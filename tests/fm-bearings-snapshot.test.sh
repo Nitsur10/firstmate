@@ -2108,7 +2108,7 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
 }
 
 test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
-  local parent fakebin remote_home json oversized
+  local parent fakebin remote_home json oversized trailing bytes max_bytes
   parent=$(make_home remote-ledger-fallback)
   make_remote_ledger_fleet "$parent" 1
   remote_home="$TMP_ROOT/remote-ledger-home-1"
@@ -2125,6 +2125,18 @@ test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
   ' >/dev/null || fail "a no-ledger remote home did not use and disclose the compatibility fallback: $json"
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 2 ] \
     || fail "the no-ledger home did not perform one file read followed by one compatibility summary"
+
+  cp "$remote_home/state/fallback-summary.json" "$remote_home/state/fallback-summary.base"
+  bytes=$(LC_ALL=C wc -c < "$remote_home/state/fallback-summary.json" | tr -d ' ')
+  max_bytes=$((bytes + 4))
+  printf '\n\n\n\n\n\n\n\n' >> "$remote_home/state/fallback-summary.json"
+  trailing=$(FM_SNAPSHOT_LEDGER_MODE=off FM_SNAPSHOT_SECONDMATE_MAX_BYTES="$max_bytes" \
+    run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$trailing" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("exceeded byte limit"))
+  ' >/dev/null || fail "legacy mode ignored trailing bytes beyond the summary bound: $trailing"
+  mv "$remote_home/state/fallback-summary.base" "$remote_home/state/fallback-summary.json"
 
   jq '.padding = ("x" * 2048)' "$remote_home/state/fallback-summary.json" \
     > "$remote_home/state/fallback-summary.next"

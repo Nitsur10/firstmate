@@ -1001,6 +1001,17 @@ summary_file_oversized() {  # <file>
   [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]
 }
 
+legacy_summary_capture() {  # <output> <timeout> <command...>
+  local output=$1 timeout=$2
+  shift 2
+  fm_run_timed "$timeout" bash -c '
+    limit=$1
+    shift
+    set -o pipefail
+    "$@" | LC_ALL=C head -c "$limit"
+  ' fm-legacy-summary "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$@" > "$output"
+}
+
 snapshot_cache_prepare() {
   local mode
   SNAPSHOT_CACHE_AVAILABLE=0
@@ -1378,8 +1389,8 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local summary_file summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local summary_file summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file legacy_file
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1402,8 +1413,12 @@ secondmate_current_json() {  # <parent-tasks-json>
   rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
-  if [ "$FM_SNAPSHOT_LEDGER_MODE" = on ] && [ -n "$rows" ]; then
-    prepare_remote_summary_collection "$rows" || return 1
+  if [ -n "$rows" ]; then
+    if [ "$FM_SNAPSHOT_LEDGER_MODE" = on ]; then
+      prepare_remote_summary_collection "$rows" || return 1
+    else
+      SNAPSHOT_COLLECT_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-legacy.XXXXXX") || return 1
+    fi
   fi
 
   while IFS= read -r row; do
@@ -1529,13 +1544,15 @@ secondmate_current_json() {  # <parent-tasks-json>
         fi
       fi
     elif [ -z "$reason" ]; then
+      legacy_file=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/legacy-summary.XXXXXX") || return 1
       if [ "$remote" = true ]; then
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
+        legacy_summary_capture "$legacy_file" "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+          < /dev/null 2>/dev/null
         summary_rc=$?
         summary_source='legacy-remote-summary'
       else
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
+        legacy_summary_capture "$legacy_file" "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
           FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
           FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
@@ -1543,19 +1560,15 @@ secondmate_current_json() {  # <parent-tasks-json>
           FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
           FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
           FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
+          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null
         summary_rc=$?
         summary_source='legacy-local-summary'
       fi
-      summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
-      case "$summary_bytes" in ''|*[!0-9]*) summary_bytes=0; summary_rc=1 ;; esac
-      if [ "$summary_rc" -ne 0 ]; then
-        summary='{}'
-        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
-      elif [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
-        summary='{}'
+      if summary_file_oversized "$legacy_file"; then
         reason="structured home snapshot exceeded byte limit"
-      elif ! printf '%s' "$summary" | jq -e --arg home "$home" '
+      elif [ "$summary_rc" -ne 0 ]; then
+        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+      elif ! jq -e --arg home "$home" '
         .schema == "fm-secondmate-home-summary.v1" and .home == $home
         and (.generated_epoch | type) == "number"
         and (.valid | type) == "boolean" and (.state | type) == "string"
@@ -1564,13 +1577,17 @@ secondmate_current_json() {  # <parent-tasks-json>
         and (.holds | type) == "array" and (.queued | type) == "array"
         and (.landed | type) == "array" and (.endpoints | type) == "array"
         and (.counts | type) == "object" and (.omitted | type) == "array"
-      ' >/dev/null 2>&1; then
+      ' "$legacy_file" >/dev/null 2>&1; then
         reason="structured home snapshot was malformed or stale"
       else
-        summary_age=$(printf '%s' "$summary" | jq -r --argjson now "$SNAPSHOT_EPOCH" '[$now - .generated_epoch, 0] | max')
-        summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
-        summary_freshness=fresh
+        summary=$(jq -c . "$legacy_file") || reason="structured home snapshot was malformed or stale"
+        if [ -z "$reason" ]; then
+          summary_age=$(snapshot_summary_age "$legacy_file")
+          summary_observed=$(jq -r '.generated' "$legacy_file")
+          summary_freshness=fresh
+        fi
       fi
+      rm -f -- "$legacy_file"
     fi
     if [ -z "$reason" ]; then
       summary_sampled=true
