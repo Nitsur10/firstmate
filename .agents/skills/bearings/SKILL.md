@@ -17,7 +17,7 @@ Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
 A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, one durable reconcile-notify request when the captured state needs one, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
@@ -159,6 +159,6 @@ Rules that keep the contract unambiguous:
 ## Supervision discipline
 
 During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, a durable local reconcile-notify request, explicit report or board artifacts, binding, and source registration.
-Do not tear down a task, merge a PR, dispatch queued work, steer a worker except through the reconcile hook, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
+Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

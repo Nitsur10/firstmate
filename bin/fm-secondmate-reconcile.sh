@@ -62,20 +62,24 @@
 # identity guard. The current metadata must still have no spawn_gen and must still
 # name that host. A row with neither identity fails loudly.
 #
-# Exit status: 0 when no delivery or cooldown-recording failure is known,
+# Notify exits 0 when no delivery or cooldown-recording failure is known,
 # including when a home was skipped for lock contention or a stale endpoint;
-# 1 when at least one due send failed or its cooldown could not be recorded.
-# A known-undelivered send records nothing, so the next snapshot retries it; an
-# unconfirmed send records the nudge, because a duplicate ask is worse than one
-# the mate may already have.
+# it exits 1 when at least one due send failed or its cooldown could not be
+# recorded. A known-undelivered send records no cooldown. Process-requests
+# preserves that request for the next supervision pass; an unconfirmed send
+# records the nudge, because a duplicate ask is worse than one the mate may
+# already have.
 #
-# Output, one line per selected home in mismatch:
+# Notify output, one line per selected home in mismatch:
 #   sent: <mate-id> <kind>          one reconcile instruction was recorded
 #   cooldown: <mate-id> <seconds>   nudged this recently; nothing sent
 #   skipped: <mate-id> lock         a required lock was busy; cooldown unchanged
 #   stale: <mate-id> <kind>         the sampled endpoint retired or changed
 #   failed: <mate-id> <kind>        the steer could not be recorded
 #   sent-unrecorded: <mate-id> <kind>  sent, but cooldown commit failed
+# Request prints `requested: <path>` or `not-needed`.
+# Process-requests prints `processed: <count> deferred: <count>` after work and
+# exits 1 when any request remains deferred; an empty queue is silent success.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

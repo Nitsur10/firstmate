@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-fleet-snapshot.sh - read-only structured fleet snapshot.
+# fm-fleet-snapshot.sh - structured fleet snapshot with observational caching.
 #
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
@@ -34,17 +34,20 @@
 #     It never changes captain_actionable; renderers may use it to keep
 #     prose-deferred rows out of default views.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
+#     state, source, detail, and raw line separately. Remote secondmate rows use
+#     an explicit unknown value because their endpoint liveness belongs to
+#     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend endpoint-presence read.
-#     endpoint.agent_alive is populated for secondmates only, where it is useful
-#     return-channel supervision data; other tasks use "not_checked".
+#     endpoint.exists is the cheap local backend endpoint-presence read.
+#     endpoint.agent_alive is populated for local secondmates only, where it is
+#     useful return-channel supervision data; remote secondmates use "unknown"
+#     without a probe, and other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -58,8 +61,12 @@
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. Every successfully sampled
-#     home also carries reconcile_inventory independently of projection trust.
+#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     distinguishes "local-ledger", "remote-ledger", "remote-ledger-cache",
+#     "legacy-local-summary", and "legacy-remote-summary"; freshness is "cached"
+#     only for the cache source, and observed_at/age_seconds come from the
+#     selected summary's generation. Every successfully sampled home also carries
+#     reconcile_inventory independently of projection trust.
 #     Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
@@ -192,17 +199,19 @@ Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until, deferred_marker, and plural
 blocker fields for downstream projections. A captain hold is actionable only
 when every blocker is Done and any hold-until date has arrived.
-Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
-bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
+count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 FM_SNAPSHOT_LEDGER_MODE defaults to on. In that mode every sampled remote home's
 state/home-summary.json is fetched concurrently under one FM_SNAPSHOT_BUDGET
-(default 5 seconds), with prior fetched copies under FM_SNAPSHOT_CACHE_DIR used
-when a fetch misses its deadline. A definitively missing or malformed ledger
-with no cache starts the legacy summary fallback inside that same total budget
-for mixed-fleet compatibility.
+(default 5 seconds), with a valid prior copy under FM_SNAPSHOT_CACHE_DIR used
+when the live read fails, is invalid, or consumes the budget. A live read that
+fails or validates malformed before consuming the budget can start the legacy
+summary fallback inside that same total budget for mixed-fleet compatibility.
+FM_SNAPSHOT_SECONDMATE_TIMEOUT bounds local summary fallback and the diagnostic
+legacy mode selected with FM_SNAPSHOT_LEDGER_MODE=off.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
-(default 10 seconds), so one unreachable remote secondmate host cannot extend
-the snapshot without limit; a read that hits the bound reports state unknown.
+(default 10 seconds); a read that hits the bound reports state unknown. Remote
+secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
