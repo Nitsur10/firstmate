@@ -17,7 +17,7 @@ Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
 A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, one durable reconcile-notify request when the captured state needs one, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile record.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
@@ -38,7 +38,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    It is the single bounded, deterministic fleet-state source for Bearings.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
-   Keep the default local-only read unless the captain asks to include PRs.
+   The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
+   Only pass `--include-prs` when the captain asks for live GitHub PR enrichment.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`); every due, unblocked captain-held task appears under `decisions_open`, whatever its kind.

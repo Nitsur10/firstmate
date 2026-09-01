@@ -11,13 +11,14 @@
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
 #
-# LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
-# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
-# performs no live discovery or checks. Live PR discovery/checks happen ONLY under
-# --include-prs, which is the sole path that touches the network; all gh coupling
-# lives in that branch and never in the canonical snapshot. The default output states
-# explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# By default the canonical snapshot performs bounded concurrent remote-ledger reads
+# for registered remote homes under one shared collection budget and may atomically
+# refresh its parent-side ledger cache. It MAY surface PR URLs already recorded in
+# task meta (recorded_prs), but performs no live GitHub discovery or checks. Live PR
+# discovery/checks happen ONLY under --include-prs; all gh coupling lives in that
+# branch and never in the canonical snapshot. The default output states explicitly
+# (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
+# never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
@@ -39,16 +40,16 @@
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
-# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# secondmate home whose backlog was unreadable; no live GitHub call is involved.
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
 # order.
 #
 # Flags:
-#   (default)        compact projection, TOON, local-only
+#   (default)        compact projection with bounded remote-ledger collection, TOON
 #   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
@@ -61,7 +62,8 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
+# parent-side remote-ledger cache refresh is the only default fleet-state mutation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,7 +111,9 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Default collection performs bounded concurrent remote-ledger reads for registered
+remote homes under one shared snapshot budget and may refresh the parent-side cache.
+--include-prs additionally performs live GitHub discovery and checks.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
@@ -187,7 +191,7 @@ fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
-# --- optional live PR enrichment (the ONLY network path) --------------------
+# --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
 CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
