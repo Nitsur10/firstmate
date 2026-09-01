@@ -1013,12 +1013,12 @@ summary_file_oversized() {  # <file>
 legacy_summary_capture() {  # <output> <timeout> <command...>
   local output=$1 timeout=$2
   shift 2
-  fm_run_timed "$timeout" bash -c '
-    limit=$1
+  fm_run_timed "$timeout" bash -c "
+    limit=\$1
     shift
     set -o pipefail
-    "$@" | LC_ALL=C head -c "$limit"
-  ' fm-legacy-summary "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$@" > "$output"
+    \"\$@\" | LC_ALL=C head -c \"\$limit\"
+  " fm-legacy-summary "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$@" > "$output"
 }
 
 snapshot_cache_prepare() {
