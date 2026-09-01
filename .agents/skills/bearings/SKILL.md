@@ -16,7 +16,7 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from the cooldown-limited reconcile instruction and its `state/<id>.reconcile-nudged` record, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, one durable reconcile-notify request when the captured state needs one, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile record.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
@@ -50,13 +50,15 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
    The same holds for a secondmate home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, landed, or live work.
 
-2. **Ask any home whose own books disagree to reconcile them.**
+2. **Record a later reconcile notification for any home whose own books disagree.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot -` inline immediately after gathering the snapshot, so the durable fire-and-forget enqueue finishes before digest composition without spawning any child or second snapshot.
-   The script header owns the cooldown window, non-blocking lock skips, stale-endpoint checks, retry, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
-   If the hook reports a skip or failure, continue composing the digest from the captured snapshot; a lock skip or known-undelivered send leaves the cooldown unset for a later recap.
-   A home is asked at most once per four-hour window, so running this on every recap costs nothing and cannot nag, while a mismatch still sitting there after the window earns one gentle re-nudge.
-   Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the mate acts asynchronously from its durable inbox while the digest is composed from the snapshot already in hand.
+   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh request --snapshot -` immediately after gathering the snapshot.
+   This atomically records a local one-shot request and returns without sending, taking a mate lifecycle lock, or waiting behind a local or remote delivery queue.
+   The supervision loop later claims the request and runs the cooldown-limited fire-and-forget delivery; the script header owns request durability, retries, cooldown, identity checks, and retirement.
+   Continue composing the digest from the captured snapshot as soon as the local request is recorded.
+   If local request publication fails, continue composing, report that durability blocker, and never fall back to an inline send.
+   A home is still asked at most once per four-hour window, while a skipped or failed later delivery leaves the request durable for another supervision pass.
+   Never edit another home's backlog or metadata from here, and never expect or wait on a reply.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
@@ -155,7 +157,7 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-During a digest/build invocation, this skill changes no fleet state beyond its reconcile instruction and cooldown record, explicit report or board artifacts, binding, and source registration.
+During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, a durable local reconcile-notify request, explicit report or board artifacts, binding, and source registration.
 Do not tear down a task, merge a PR, dispatch queued work, steer a worker except through the reconcile hook, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

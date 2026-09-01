@@ -1492,6 +1492,15 @@ while :; do
     home_summary_refresh_detached
   fi
 
+  # Bearings publishes reconcile asks as local one-shot request files and
+  # returns before any mate delivery. Supervision owns their later delivery;
+  # a skipped or failed request remains durable for another poll.
+  if [ -d "$STATE/reconcile-notify" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests >/dev/null 2>&1 \
+      || triage_log "secondmate reconcile notify request deferred"
+  fi
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.

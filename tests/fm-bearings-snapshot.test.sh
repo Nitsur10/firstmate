@@ -186,6 +186,86 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
+write_remote_home_summary() {  # <remote-home> <generated-epoch>
+  local home=$1 epoch=$2
+  mkdir -p "$home/state"
+  jq -n --arg home "$home" --argjson epoch "$epoch" '{
+    schema:"fm-secondmate-home-summary.v1",
+    generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
+    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",
+    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
+  }' > "$home/state/home-summary.json"
+}
+
+make_remote_ledger_fleet() {  # <parent-home> <count>
+  local parent=$1 count=$2 i id remote_home
+  mkdir -p "$parent/data" "$parent/state" "$parent/config" "$parent/projects"
+  : > "$parent/data/backlog.md"
+  : > "$parent/data/secondmates.md"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    id="ledger-$i"
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    mkdir -p "$remote_home/state"
+    remote_home=$(cd "$remote_home" && pwd -P)
+    printf -- '- %s - ledger fixture (host: host-%s; root: /remote/root; home: %s; scope: fixture; projects: sample; added 2026-09-01)\n' \
+      "$id" "$i" "$remote_home" >> "$parent/data/secondmates.md"
+    fm_write_meta "$parent/state/$id.meta" \
+      "kind=secondmate" "mode=secondmate" "harness=pi" \
+      "remote_host=host-$i" "remote_root=/remote/root" "home=$remote_home"
+    write_remote_home_summary "$remote_home" 1000
+    i=$((i + 1))
+  done
+}
+
+make_remote_ledger_ssh() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+remote_home=$(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$3")
+args=()
+while IFS= read -r -d '' arg; do args+=("$arg"); done \
+  < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$4")
+printf '%s\t%s\n' "$remote_home" "${args[0]:-}" >> "$FM_TEST_LEDGER_CALL_LOG"
+if [ -f "$remote_home/state/slow-ledger-read" ]; then
+  sleep 30 &
+  sleeper=$!
+  printf '%s %s\n' "$$" "$sleeper" >> "$FM_TEST_LEDGER_PID_LOG"
+  wait "$sleeper"
+fi
+case "${args[0]:-}" in
+  fm-remote-file.sh)
+    [ -f "$remote_home/state/home-summary.json" ] || exit 1
+    cat "$remote_home/state/home-summary.json"
+    ;;
+  fm-fleet-snapshot.sh)
+    [ -f "$remote_home/state/fallback-summary.json" ] || exit 1
+    cat "$remote_home/state/fallback-summary.json"
+    ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fb/fake-ssh"
+  printf '%s\n' "$fb"
+}
+
+run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
+  local parent=$1 fakebin=$2 epoch=$3
+  FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" \
+    FM_TEST_LEDGER_PID_LOG="$parent/ledger-pids.log" \
+    FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
+    FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
+}
+
 # End-to-end Domain Alpha regression fixture.
 # The parent event claims Phase 7 started, while the registered home has no child
 # metadata, every sample-rollout item is Done, and only an external legal hold remains.
@@ -1062,7 +1142,11 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk; do
+    ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  for cmd in shasum sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || continue
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1946,6 +2030,99 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
+  local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid
+  parent=$(make_home concurrent-remote-ledgers)
+  make_remote_ledger_fleet "$parent" 5
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+
+  started=$(date +%s)
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 5 ] || fail "five healthy remote ledgers did not complete in low single-digit seconds (${elapsed}s)"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "a healthy snapshot did not issue exactly one remote file read per home"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 5
+      and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
+  ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages: $json"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    : > "$remote_home/state/slow-ledger-read"
+    i=$((i + 1))
+  done
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  started=$(date +%s)
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 7 ] || fail "five wedged remote reads exceeded the three-second fleet budget (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 5
+      and all(.secondmates[]; .freshness == "cached" and .age_seconds == 1000
+        and .provenance == "structured-home-cache")
+      and ([.omitted[] | select(.surface | contains("served from cached home ledger"))] | length) == 5
+  ' >/dev/null || fail "wedged homes did not use and disclose age-labeled cache rows: $json"
+  sleep 0.3
+  while read -r collector_pid sleeper_pid; do
+    for pid in "$collector_pid" "$sleeper_pid"; do
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        fail "a cancelled remote ledger collector process survived the total budget (pid $pid)"
+      fi
+    done
+  done < "$parent/ledger-pids.log"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    remote_home=$(cd "$remote_home" && pwd -P)
+    rm -f "$remote_home/state/slow-ledger-read"
+    write_remote_home_summary "$remote_home" 1990
+    i=$((i + 1))
+  done
+  : > "$TMP_ROOT/remote-ledger-home-1/state/slow-ledger-read"
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.freshness == "fresh" and .age_seconds == 10)] | length) == 4
+      and ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached"
+        and .age_seconds == 1000 and .provenance == "structured-home-cache")] | length) == 1
+      and ([.omitted[] | select(.surface == "secondmate ledger-1 served from cached home ledger")] | length) == 1
+  ' >/dev/null || fail "one slow home prevented four fresh rows or hid its cache disclosure: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "the mixed-speed snapshot made more than one remote read per ledger home"
+  pass "remote ledgers collect concurrently under one budget, reuse aged cache, and cancel wedged collectors"
+}
+
+test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
+  local parent fakebin remote_home json
+  parent=$(make_home remote-ledger-fallback)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  cp "$remote_home/state/home-summary.json" "$remote_home/state/fallback-summary.json"
+  rm -f "$remote_home/state/home-summary.json" "$remote_home/state/slow-ledger-read"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 1
+      and .secondmates[0].state == "no_active_work"
+      and (.omitted | any(.surface == "secondmate ledger-1 used mixed-fleet summary fallback"))
+  ' >/dev/null || fail "a no-ledger remote home did not use and disclose the compatibility fallback: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 2 ] \
+    || fail "the no-ledger home did not perform one file read followed by one compatibility summary"
+  pass "a mixed-version remote home falls back only after its ledger is unavailable"
+}
+
+test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
+test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed

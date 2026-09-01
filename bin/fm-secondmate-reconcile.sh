@@ -3,6 +3,8 @@
 # most once per home per cooldown window.
 #
 # Usage:
+#   fm-secondmate-reconcile.sh request --snapshot <file>|-
+#   fm-secondmate-reconcile.sh process-requests
 #   fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
 #   fm-secondmate-reconcile.sh nudged <mate-id>
 #
@@ -21,6 +23,11 @@
 # reconcile instruction and stops there.
 #
 # What this script owns:
+#   - the durable one-shot request queue under state/reconcile-notify. Bearings
+#     records a captured snapshot there and returns without sending. The watcher
+#     later runs process-requests, which claims each request, invokes the normal
+#     notify path, retires delivered or stale requests, and preserves skipped or
+#     failed requests for another supervision pass;
 #   - reading the mismatch from an already-produced fleet snapshot, so nothing
 #     here re-parses another home's state or runs a second child summary;
 #   - the cooldown. One durable per-home timestamp records the last nudge, and a
@@ -39,8 +46,9 @@
 # What this script must never do:
 #   - edit the mate's backlog, metadata, or queue from the parent. The mate owns
 #     its own cleanup; the parent only asks.
-#   - block a snapshot or digest. The enqueue is a fast local durable write, and
-#     a send failure is reported, never fatal to the caller's own work.
+#   - block a snapshot or digest. The Bearings path only publishes a local
+#     request file. Sending happens later under supervision, and a send failure
+#     preserves the request for another pass.
 #
 # Lock acquisition is non-blocking. A busy reconcile, lifecycle-control, or
 # metadata lock skips that home without starting its cooldown, so a later recap
@@ -79,10 +87,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # One nudge per home per four hours.
 FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
+FM_RECONCILE_REQUEST_MAX_BYTES=${FM_RECONCILE_REQUEST_MAX_BYTES:-1048576}
 case "$FM_RECONCILE_COOLDOWN_SECONDS" in
   ''|*[!0-9]*) echo "fm-secondmate-reconcile: FM_RECONCILE_COOLDOWN_SECONDS must be a whole number of seconds" >&2; exit 2 ;;
 esac
+case "$FM_RECONCILE_REQUEST_MAX_BYTES" in
+  ''|*[!0-9]*|0) echo "fm-secondmate-reconcile: FM_RECONCILE_REQUEST_MAX_BYTES must be a positive whole number" >&2; exit 2 ;;
+esac
 
+REQUEST_DIR="$STATE/reconcile-notify"
+ACTIVE_REQUEST_LOCK=
 ACTIVE_RECONCILE_LOCK=
 ACTIVE_CONTROL_LOCK=
 ACTIVE_META_LOCK=
@@ -93,15 +107,24 @@ release_active_locks() {
   ACTIVE_CONTROL_LOCK=
   [ -z "$ACTIVE_RECONCILE_LOCK" ] || fm_lock_release "$ACTIVE_RECONCILE_LOCK"
   ACTIVE_RECONCILE_LOCK=
+  [ -z "$ACTIVE_REQUEST_LOCK" ] || fm_lock_release "$ACTIVE_REQUEST_LOCK"
+  ACTIVE_REQUEST_LOCK=
 }
 trap release_active_locks EXIT
 trap 'release_active_locks; exit 130' INT TERM
 
 usage() {
   cat <<'EOF'
-usage: fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
+usage: fm-secondmate-reconcile.sh request --snapshot <file>|-
+       fm-secondmate-reconcile.sh process-requests
+       fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
        fm-secondmate-reconcile.sh nudged <mate-id>
 
+request  atomically record one captured mismatched-home snapshot for later
+         supervision delivery. It never sends or takes mate lifecycle locks.
+process-requests
+         deliver and retire durable requests. Intended for the watcher loop;
+         skipped or failed requests stay queued for a later pass.
 notify   ask every secondmate home whose backlog disagrees with its own task
          metadata to reconcile it, at most once per home per cooldown window.
          Reads an fm-fleet-snapshot.v1 or fm-bearings.v1 document from
@@ -188,6 +211,125 @@ A fleet snapshot found that your home's backlog and task metadata disagreed.
 
 Please check your current books and, if they still disagree, reconcile them to match reality. Nothing outside your home has been changed, and no reply is expected.
 EOF
+}
+
+request_dir_prepare() {
+  if [ -e "$REQUEST_DIR" ] || [ -L "$REQUEST_DIR" ]; then
+    [ -d "$REQUEST_DIR" ] && [ ! -L "$REQUEST_DIR" ] || return 1
+  else
+    (umask 077; mkdir "$REQUEST_DIR") || return 1
+  fi
+  chmod 700 "$REQUEST_DIR" || return 1
+}
+
+cmd_request() {
+  local snapshot_src='' tmp bytes token final
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --snapshot) [ "$#" -ge 2 ] || fail "--snapshot needs a value"; snapshot_src=$2; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$snapshot_src" ] || fail "request requires --snapshot <file>|-"
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  request_dir_prepare || fail "cannot prepare the reconcile notify request directory"
+  tmp=$(umask 077; mktemp "$REQUEST_DIR/.request.XXXXXX") \
+    || fail "cannot create a reconcile notify request"
+  if [ "$snapshot_src" = - ]; then
+    cat > "$tmp" || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
+  else
+    [ -f "$snapshot_src" ] && [ ! -L "$snapshot_src" ] \
+      || { rm -f -- "$tmp"; fail "snapshot does not exist or is unsafe: $snapshot_src"; }
+    cat "$snapshot_src" > "$tmp" || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
+  fi
+  bytes=$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) rm -f -- "$tmp"; fail "cannot size the captured snapshot" ;; esac
+  if [ "$bytes" -gt "$FM_RECONCILE_REQUEST_MAX_BYTES" ]; then
+    rm -f -- "$tmp"
+    fail "captured snapshot exceeds FM_RECONCILE_REQUEST_MAX_BYTES"
+  fi
+  jq -e '
+    if .schema == "fm-bearings.v1" then
+      any((.secondmate_reconcile // [])[];
+        .kind as $kind
+        | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
+    elif .schema == "fm-fleet-snapshot.v1" then
+      any((.secondmate_current.records // [])[];
+        .reconcile_inventory as $inv
+        | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($inv.kind))
+    else false end
+  ' "$tmp" >/dev/null 2>&1 || {
+    if jq -e '.schema == "fm-bearings.v1" or .schema == "fm-fleet-snapshot.v1"' "$tmp" >/dev/null 2>&1; then
+      rm -f -- "$tmp"
+      printf 'not-needed\n'
+      return 0
+    fi
+    rm -f -- "$tmp"
+    fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+  }
+  token=${tmp##*.}
+  final="$REQUEST_DIR/request-$token.json"
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$final"; then
+    rm -f -- "$tmp"
+    fail "cannot publish the reconcile notify request"
+  fi
+  printf 'requested: %s\n' "$final"
+}
+
+cmd_process_requests() {
+  local process_lock="$STATE/.reconcile-notify-process.lock" request claimed base original output rc deferred=0 processed=0 have_request=0
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  [ -d "$REQUEST_DIR" ] && [ ! -L "$REQUEST_DIR" ] || return 0
+  for request in "$REQUEST_DIR"/.processing-request-*.json "$REQUEST_DIR"/request-*.json; do
+    if [ -f "$request" ] && [ ! -L "$request" ]; then
+      have_request=1
+      break
+    fi
+  done
+  [ "$have_request" -eq 1 ] || return 0
+  if ! fm_lock_try_acquire "$process_lock"; then
+    return 0
+  fi
+  ACTIVE_REQUEST_LOCK=$process_lock
+  output=$(umask 077; mktemp "$REQUEST_DIR/.process-output.XXXXXX") || {
+    release_active_locks
+    return 1
+  }
+  for request in "$REQUEST_DIR"/.processing-request-*.json "$REQUEST_DIR"/request-*.json; do
+    [ -f "$request" ] && [ ! -L "$request" ] || continue
+    base=$(basename "$request")
+    case "$base" in
+      .processing-*)
+        claimed=$request
+        original="$REQUEST_DIR/${base#.processing-}"
+        ;;
+      *)
+        claimed="$REQUEST_DIR/.processing-$base"
+        original=$request
+        mv -- "$request" "$claimed" 2>/dev/null || continue
+        ;;
+    esac
+    rc=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-secondmate-reconcile.sh" notify --snapshot "$claimed" \
+      > "$output" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ] \
+      && ! grep -Eq '^(skipped|failed|sent-unrecorded):' "$output" 2>/dev/null; then
+      if rm -f -- "$claimed"; then
+        processed=$((processed + 1))
+      else
+        deferred=$((deferred + 1))
+      fi
+    else
+      mv -f -- "$claimed" "$original" 2>/dev/null || true
+      deferred=$((deferred + 1))
+    fi
+  done
+  rm -f -- "$output"
+  release_active_locks
+  printf 'processed: %s deferred: %s\n' "$processed" "$deferred"
+  [ "$deferred" -eq 0 ]
 }
 
 cmd_notify() {
@@ -364,6 +506,8 @@ EOF
 [ "$#" -ge 1 ] || { usage >&2; exit 2; }
 cmd=$1; shift
 case "$cmd" in
+  request) cmd_request "$@" ;;
+  process-requests) cmd_process_requests "$@" ;;
   notify) cmd_notify "$@" ;;
   nudged) cmd_nudged "$@" ;;
   -h|--help) usage ;;
