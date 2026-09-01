@@ -720,7 +720,7 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
 }
 
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later() {
-  local home rhome fakebin snap warm started elapsed watcher i requests
+  local home rhome fakebin snap warm started elapsed watcher i requests beat_before beat_after processing beacon_advanced=0
   fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-offpath")
   rhome=$(make_remote_secondmate_home remote-offpath-mate)
   rhome=$(cd "$rhome" && pwd -P)
@@ -768,12 +768,35 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     [ ! -e "$lock" ] || fail "the request path left a mate lifecycle lock held: $lock"
   done
 
-  FM_TEST_RECONCILE_REMOTE_DELAY=2 \
+  FM_TEST_RECONCILE_REMOTE_DELAY=4 \
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$home/state" FM_POLL=30 FM_HOME_SUMMARY_INTERVAL=999999 \
+    FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 \
     "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
   watcher=$!
+  i=0
+  processing=''
+  while [ "$i" -lt 100 ]; do
+    processing=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '.processing-*.json' -print -quit)
+    [ -n "$processing" ] && [ -e "$home/state/.last-watcher-beat" ] && break
+    kill -0 "$watcher" 2>/dev/null || break
+    i=$((i + 1))
+    sleep 0.05
+  done
+  [ -n "$processing" ] || fail "supervision did not claim the durable reconcile request"
+  beat_before=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
+  i=0
+  while [ -e "$processing" ] && [ "$i" -lt 70 ]; do
+    sleep 0.05
+    beat_after=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
+    if [ "$beat_after" -gt "$beat_before" ]; then
+      beacon_advanced=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$beacon_advanced" -eq 1 ] \
+    || fail "the watcher beacon stalled behind delayed reconcile delivery"
   i=0
   while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
       || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \

@@ -1400,6 +1400,22 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+RECONCILE_REQUEST_PID=
+reconcile_requests_detached() {
+  if [ -n "$RECONCILE_REQUEST_PID" ]; then
+    if kill -0 "$RECONCILE_REQUEST_PID" 2>/dev/null; then
+      return 0
+    fi
+    if ! wait "$RECONCILE_REQUEST_PID" 2>/dev/null; then
+      triage_log "secondmate reconcile notify request deferred"
+    fi
+    RECONCILE_REQUEST_PID=
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
+  RECONCILE_REQUEST_PID=$!
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -1496,9 +1512,7 @@ while :; do
   # returns before any mate delivery. Supervision owns their later delivery;
   # a skipped or failed request remains durable for another poll.
   if [ -d "$STATE/reconcile-notify" ]; then
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests >/dev/null 2>&1 \
-      || triage_log "secondmate reconcile notify request deferred"
+    reconcile_requests_detached
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
