@@ -38,9 +38,13 @@ PING_STATE=$(fm_backend_cmux_ping_state)
 
 WS1=""
 WS2=""
+WS3=""
+SM_TMP=""
 cleanup_all() {
   [ -z "$WS1" ] || cmux_safe_close_workspace "$WS1" "fm-test-smoke1"
   [ -z "$WS2" ] || cmux_safe_close_workspace "$WS2" "fm-test-smoke2"
+  [ -z "$WS3" ] || cmux_safe_close_workspace "$WS3" "fm-test-2ndmate-smoke"
+  [ -z "$SM_TMP" ] || rm -rf "$SM_TMP" /tmp/fm-test-2ndmate-smoke
 }
 trap cleanup_all EXIT
 
@@ -183,6 +187,55 @@ case "$live" in
   *) fail "list_live did not report the freshly created task workspace by title"$'\n'"--- got ---"$'\n'"$live" ;;
 esac
 pass "real cmux: list_live discovers a live task workspace by fm-<id> title"
+
+# --- fm-spawn.sh --secondmate: full launch path against the real app ---------
+# The whole spawn path end to end with an fm-test- task id and a throwaway
+# seeded secondmate home, using the raw-launch-command escape hatch so no real
+# agent starts: the "agent" is one echo command, which also proves the
+# send+Enter delivery landed in the workspace. The workspace cwd must be the
+# secondmate HOME (not a project worktree), and the title carries the
+# launching primary's home label (bin/backends/cmux.sh "Secondmate shape").
+SM_ID="test-2ndmate-smoke"
+SM_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-sm-smoke.XXXXXX")
+mkdir -p "$SM_TMP/home/state" "$SM_TMP/home/data" "$SM_TMP/home/config" "$SM_TMP/home/projects" \
+  "$SM_TMP/sm-home/bin" "$SM_TMP/sm-home/data"
+touch "$SM_TMP/home/state/.last-watcher-beat"
+printf '# Firstmate\n' > "$SM_TMP/sm-home/AGENTS.md"
+printf '%s\n' "$SM_ID" > "$SM_TMP/sm-home/.fm-secondmate-home"
+printf 'charter for %s\n' "$SM_ID" > "$SM_TMP/sm-home/data/charter.md"
+SM_HOME_REAL=$(cd "$SM_TMP/sm-home" && pwd -P)
+
+SPAWN_OUT=$( FM_ROOT_OVERRIDE='' FM_HOME="$SM_TMP/home" \
+  FM_STATE_OVERRIDE="$SM_TMP/home/state" FM_DATA_OVERRIDE="$SM_TMP/home/data" \
+  FM_CONFIG_OVERRIDE="$SM_TMP/home/config" FM_PROJECTS_OVERRIDE="$SM_TMP/home/projects" \
+  FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+  "$ROOT/bin/fm-spawn.sh" "$SM_ID" "$SM_TMP/sm-home" 'echo secondmate-launch-landed-captain' \
+  --secondmate --backend cmux 2>&1 ) \
+  || fail "real cmux: fm-spawn.sh --secondmate --backend cmux failed:"$'\n'"$SPAWN_OUT"
+SM_META="$SM_TMP/home/state/$SM_ID.meta"
+WS3=$(sed -n 's/^cmux_workspace_id=//p' "$SM_META")
+SM_SF=$(sed -n 's/^cmux_surface_id=//p' "$SM_META")
+[ -n "$WS3" ] && [ -n "$SM_SF" ] || fail "real cmux: secondmate meta is missing cmux workspace/surface ids"
+grep -q "^backend=cmux$" "$SM_META" || fail "real cmux: secondmate meta is missing backend=cmux"
+grep -q "^window=$WS3:$SM_SF$" "$SM_META" || fail "real cmux: secondmate meta window= does not pair the recorded ids"
+grep -q "^worktree=$SM_HOME_REAL$" "$SM_META" || fail "real cmux: secondmate meta worktree= is not the secondmate home"
+
+SM_TARGET="$WS3:$SM_SF"
+SM_TITLE=$(fm_backend_cmux_scoped_title "fm-$SM_ID")
+SM_LIVE_TITLE=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
+  | jq -r --arg id "$WS3" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+[ "$SM_LIVE_TITLE" = "$SM_TITLE" ] \
+  || fail "real cmux: secondmate workspace title '$SM_LIVE_TITLE' is not the primary-scoped '$SM_TITLE'"
+sleep 0.5
+out=$(fm_backend_cmux_capture "$SM_TARGET" 40) || fail "real cmux: capture failed on the secondmate workspace"
+case "$out" in
+  *secondmate-launch-landed-captain*) : ;;
+  *) fail "real cmux: the secondmate launch command was not delivered and submitted"$'\n'"$out" ;;
+esac
+p=$(fm_backend_cmux_current_path "$SM_TARGET") || fail "real cmux: current_path failed on the secondmate workspace"
+[ "$(cd "$p" 2>/dev/null && pwd -P)" = "$SM_HOME_REAL" ] \
+  || fail "real cmux: secondmate workspace cwd is '$p', not the secondmate home"
+pass "real cmux: fm-spawn.sh --secondmate launches a dedicated home-cwd workspace with the primary-scoped title and full cmux metadata"
 
 cleanup_all
 trap - EXIT
