@@ -237,11 +237,13 @@ cmd_request() {
   tmp=$(umask 077; mktemp "$REQUEST_DIR/.request.XXXXXX") \
     || fail "cannot create a reconcile notify request"
   if [ "$snapshot_src" = - ]; then
-    cat > "$tmp" || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
+    LC_ALL=C head -c "$((FM_RECONCILE_REQUEST_MAX_BYTES + 1))" > "$tmp" \
+      || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
   else
     [ -f "$snapshot_src" ] && [ ! -L "$snapshot_src" ] \
       || { rm -f -- "$tmp"; fail "snapshot does not exist or is unsafe: $snapshot_src"; }
-    cat "$snapshot_src" > "$tmp" || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
+    LC_ALL=C head -c "$((FM_RECONCILE_REQUEST_MAX_BYTES + 1))" "$snapshot_src" > "$tmp" \
+      || { rm -f -- "$tmp"; fail "cannot capture the snapshot"; }
   fi
   bytes=$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')
   case "$bytes" in ''|*[!0-9]*) rm -f -- "$tmp"; fail "cannot size the captured snapshot" ;; esac

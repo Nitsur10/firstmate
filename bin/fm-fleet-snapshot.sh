@@ -1101,6 +1101,17 @@ valid_summary() {  # <file> <home>
   jq -e --arg home "$home" -f "$filter" "$file" >/dev/null 2>&1
 }
 
+bounded_collect() {  # <output> <error> <command...>
+  local output=$1 error=$2 producer_rc bytes
+  shift 2
+  "$@" 2> "$error" | LC_ALL=C head -c "$((max_bytes + 1))" > "$output"
+  producer_rc=${PIPESTATUS[0]}
+  bytes=$(LC_ALL=C wc -c < "$output" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le "$max_bytes" ] || return 75
+  return "$producer_rc"
+}
+
 collect_one() {  # <manifest-row>
   local row=$1 id home cache slot fetch fallback status
   id=$(printf '%s' "$row" | jq -r '.id') || return
@@ -1120,8 +1131,8 @@ collect_one() {  # <manifest-row>
     printf 'cached\n' > "$status"
     return
   fi
-  if "$script_dir/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
-      > "$fallback" 2> "$out_dir/$slot.fallback.err" \
+  if bounded_collect "$fallback" "$out_dir/$slot.fallback.err" \
+      "$script_dir/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
       && valid_summary "$fallback" "$home"; then
     printf 'fallback\n' > "$status"
     return
@@ -1367,7 +1378,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local summary_file summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
@@ -1536,9 +1547,14 @@ secondmate_current_json() {  # <parent-tasks-json>
         summary_rc=$?
         summary_source='legacy-local-summary'
       fi
+      summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
+      case "$summary_bytes" in ''|*[!0-9]*) summary_bytes=0; summary_rc=1 ;; esac
       if [ "$summary_rc" -ne 0 ]; then
         summary='{}'
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+      elif [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
+        summary='{}'
+        reason="structured home snapshot exceeded byte limit"
       elif ! printf '%s' "$summary" | jq -e --arg home "$home" '
         .schema == "fm-secondmate-home-summary.v1" and .home == $home
         and (.generated_epoch | type) == "number"

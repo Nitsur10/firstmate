@@ -579,7 +579,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
-  local home mate fakebin json i
+  local home mate fakebin json legacy i
   home=$(make_home oversized-home)
   mate="$TMP_ROOT/oversized-secondmate-home"
   make_valid_secondmate_home oversized "$mate"
@@ -609,7 +609,14 @@ EOF
       and (.decisions_open | any(.owner == "oversized") | not)
       and (.landed | any(.owner == "oversized") | not)
   ' >/dev/null || fail "oversized summary revived or retained unvalidated surfaces: $json"
-  pass "an oversized secondmate summary retains the strict empty unknown fallback"
+  legacy=$(FM_SNAPSHOT_LEDGER_MODE=off FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 run "$home" "$fakebin" --json)
+  printf '%s' "$legacy" | jq -e '
+    (.secondmates | any(.id == "oversized" and .state == "unknown"
+      and (.reason | contains("exceeded byte limit"))))
+      and (.in_flight | any(.id == "oversized") | not)
+      and (.landed | any(.owner == "oversized") | not)
+  ' >/dev/null || fail "legacy mode accepted an oversized structured summary: $legacy"
+  pass "oversized summaries stay strict unknown in ledger and compatibility modes"
 }
 
 test_secondmate_and_child_bounds_are_disclosed() {
@@ -2101,7 +2108,7 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
 }
 
 test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
-  local parent fakebin remote_home json
+  local parent fakebin remote_home json oversized
   parent=$(make_home remote-ledger-fallback)
   make_remote_ledger_fleet "$parent" 1
   remote_home="$TMP_ROOT/remote-ledger-home-1"
@@ -2118,7 +2125,17 @@ test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
   ' >/dev/null || fail "a no-ledger remote home did not use and disclose the compatibility fallback: $json"
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 2 ] \
     || fail "the no-ledger home did not perform one file read followed by one compatibility summary"
-  pass "a mixed-version remote home falls back only after its ledger is unavailable"
+
+  jq '.padding = ("x" * 2048)' "$remote_home/state/fallback-summary.json" \
+    > "$remote_home/state/fallback-summary.next"
+  mv "$remote_home/state/fallback-summary.next" "$remote_home/state/fallback-summary.json"
+  : > "$parent/ledger-calls.log"
+  oversized=$(FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$oversized" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("exceeded byte limit"))
+  ' >/dev/null || fail "an oversized remote compatibility fallback was accepted: $oversized"
+  pass "a mixed-version remote fallback is bounded before validation"
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache

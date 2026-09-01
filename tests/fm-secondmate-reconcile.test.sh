@@ -719,6 +719,22 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
   pass "a row with neither a spawn generation nor a host fails loudly instead of vanishing"
 }
 
+test_reconcile_request_rejects_an_unbounded_input_without_filling_storage() {
+  local home started elapsed files
+  { read -r home; read -r _; read -r _; } < <(make_main_home bounded-request bounded-request-mate)
+  started=$(date +%s)
+  if yes x | FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      FM_RECONCILE_REQUEST_MAX_BYTES=64 "$RECONCILE" request --snapshot - \
+      > "$home/request.out" 2> "$home/request.err"; then
+    fail "an oversized streaming request was accepted"
+  fi
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 3 ] || fail "an oversized streaming request did not stop at its byte bound"
+  files=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+  [ "$files" -eq 0 ] || fail "an oversized streaming request left captured data behind"
+  pass "reconcile requests stop oversized streams at the capture bound"
+}
+
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later() {
   local home rhome fakebin snap warm started elapsed watcher i requests beat_before beat_after processing beacon_advanced=0
   fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-offpath")
@@ -820,6 +836,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   pass "Bearings records locally, returns before a delayed remote queue, and supervision delivers later"
 }
 
+test_reconcile_request_rejects_an_unbounded_input_without_filling_storage
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
