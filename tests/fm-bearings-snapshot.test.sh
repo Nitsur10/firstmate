@@ -243,7 +243,11 @@ fi
 case "${args[0]:-}" in
   fm-remote-file.sh)
     [ -f "$remote_home/state/home-summary.json" ] || exit 1
-    cat "$remote_home/state/home-summary.json"
+    if [ -f "$remote_home/state/unbounded-ledger-read" ]; then
+      yes x
+    else
+      cat "$remote_home/state/home-summary.json"
+    fi
     ;;
   fm-fleet-snapshot.sh)
     [ -f "$remote_home/state/fallback-summary.json" ] || exit 1
@@ -2055,6 +2059,17 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
   ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages: $json"
+
+  : > "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
+  : > "$parent/ledger-calls.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached")] | length) == 1
+      and ([.secondmates[] | select(.id != "ledger-1" and .freshness == "fresh")] | length) == 4
+  ' >/dev/null || fail "an unbounded primary ledger stream consumed the shared collector budget: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "bounding one faulty primary ledger added remote reads"
+  rm -f "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
 
   i=1
   while [ "$i" -le 5 ]; do

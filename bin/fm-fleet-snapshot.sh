@@ -1132,8 +1132,8 @@ collect_one() {  # <manifest-row>
   fetch="$out_dir/$slot.fetch"
   fallback="$out_dir/$slot.fallback"
   status="$out_dir/$slot.status"
-  if "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
-      > "$fetch" 2> "$out_dir/$slot.fetch.err" \
+  if bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
+      "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
       && valid_summary "$fetch" "$home"; then
     printf 'fresh\n' > "$status"
     return
