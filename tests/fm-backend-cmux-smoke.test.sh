@@ -10,7 +10,7 @@
 # closes ONLY what it created, never enumerates-and-closes, never quits or
 # relaunches the app, and closes every workspace it created via
 # tests/cmux-test-safety.sh's guarded close (cleanup_all below owns the
-# ownership proof and the one deliberately retained temp root). The adapter
+# ownership proof and reclaims every temp root the run created). The adapter
 # turns those plain labels into home-scoped cmux workspace titles internally.
 #
 # Skips cleanly when cmux (or jq) is not installed/reachable, so CI/dev
@@ -57,10 +57,12 @@ cleanup_all() {
     fi
     [ -z "$WS3" ] || cmux_safe_close_workspace "$WS3" "fm-$SM_ID"
     rm -rf "$SM_TMP"
-    # fm-spawn.sh creates the task's own /tmp/fm-<id> temp root; it is
-    # deliberately left in place, because no ownership check on a shared /tmp
-    # path is free of check-to-delete races, and the empty per-task dirs are
-    # reclaimed by the OS tmp cleaner.
+    # fm-spawn.sh creates the task's own /tmp/fm-<id> temp root (the path
+    # fm-teardown.sh reclaims from meta's tasktmp=). The same per-run
+    # uniqueness of SM_ID that makes the workspace close ownership-sound makes
+    # this path exclusively this run's, so it is removed rather than left to
+    # accumulate one empty directory per run.
+    [ -z "$SM_ID" ] || rm -rf "/tmp/fm-$SM_ID"
   fi
 }
 trap cleanup_all EXIT
