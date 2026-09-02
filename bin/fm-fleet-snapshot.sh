@@ -1415,7 +1415,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local summary_file summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file legacy_file
+  local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file legacy_file
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1497,7 +1497,6 @@ secondmate_current_json() {  # <parent-tasks-json>
         esac
       fi
     fi
-    summary_file=
     summary_source=
     summary_age=0
     summary_observed=$SNAPSHOT_NOW
@@ -1508,15 +1507,12 @@ secondmate_current_json() {  # <parent-tasks-json>
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)
         if summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home"); then
-          summary_file="$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"
           summary_source='remote-ledger'
           [ -z "$cache_path" ] || snapshot_cache_store "$summary" "$cache_path" || true
         elif [ -n "$cache_path" ] && summary=$(summary_file_read "$cache_path" "$home"); then
-          summary_file=$cache_path
           summary_source='remote-ledger-cache'
           summary_freshness=cached
         elif summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback" "$home"); then
-          summary_file="$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback"
           summary_source='legacy-remote-summary'
           summary_freshness=fresh
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback"; then
@@ -1528,7 +1524,6 @@ secondmate_current_json() {  # <parent-tasks-json>
         fi
       else
         if summary=$(summary_file_read "$home/state/home-summary.json" "$home"); then
-          summary_file="$home/state/home-summary.json"
           summary_source='local-ledger'
         else
           fallback_file=$(mktemp "$SNAPSHOT_COLLECT_DIR/local-summary.XXXXXX") || return 1
@@ -1549,7 +1544,6 @@ secondmate_current_json() {  # <parent-tasks-json>
             "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
             > "$fallback_file" 2>/dev/null || summary_rc=$?
           if [ "$summary_rc" -eq 0 ] && summary=$(summary_file_read "$fallback_file" "$home"); then
-            summary_file=$fallback_file
             summary_source='legacy-local-summary'
             summary_freshness=fresh
           elif summary_file_oversized "$fallback_file"; then
