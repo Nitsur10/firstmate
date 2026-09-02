@@ -217,6 +217,22 @@ Please check your current books and, if they still disagree, reconcile them to m
 EOF
 }
 
+request_target_key() {
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | shasum -a 256 | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | sha256sum | awk '{print $1}') || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
+  else
+    return 1
+  fi
+  case "$digest" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$digest"
+}
+
 request_dir_prepare() {
   if [ -e "$REQUEST_DIR" ] || [ -L "$REQUEST_DIR" ]; then
     [ -d "$REQUEST_DIR" ] && [ ! -L "$REQUEST_DIR" ] || return 1
@@ -227,7 +243,7 @@ request_dir_prepare() {
 }
 
 cmd_request() {
-  local snapshot_src='' tmp bytes token final
+  local snapshot_src='' tmp bytes targets target id home host key pending final published=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --snapshot) [ "$#" -ge 2 ] || fail "--snapshot needs a value"; snapshot_src=$2; shift 2 ;;
@@ -274,13 +290,51 @@ cmd_request() {
     rm -f -- "$tmp"
     fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
   }
-  token=${tmp##*.}
-  final="$REQUEST_DIR/request-$token.json"
-  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$final"; then
-    rm -f -- "$tmp"
-    fail "cannot publish the reconcile notify request"
-  fi
-  printf 'requested: %s\n' "$final"
+  targets=$(jq -c '
+    [if .schema == "fm-bearings.v1" then
+       (.secondmate_reconcile // [])[]
+       | {id,home:"",host:(.host // ""),kind:(.kind // "")}
+     else
+       (.secondmate_current.records // [])[]
+       | {id,home:(.home // ""),host:(.host // ""),kind:(.reconcile_inventory.kind // "")}
+     end
+     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
+     | select((.home | type) == "string" and (.host | type) == "string")
+     | .kind as $kind
+     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))]
+    | unique_by([.id,.home,.host])[]
+  ' "$tmp") || { rm -f -- "$tmp"; fail "cannot identify reconcile notify targets"; }
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    id=$(printf '%s' "$target" | jq -r '.id') || continue
+    home=$(printf '%s' "$target" | jq -r '.home') || continue
+    host=$(printf '%s' "$target" | jq -r '.host') || continue
+    key=$(request_target_key "$id" "$home" "$host") \
+      || { rm -f -- "$tmp"; fail "cannot identify reconcile notify target"; }
+    pending=$(umask 077; mktemp "$REQUEST_DIR/.request.XXXXXX") \
+      || { rm -f -- "$tmp"; fail "cannot create a reconcile notify request"; }
+    if ! jq -c --arg id "$id" --arg home "$home" --arg host "$host" '
+      if .schema == "fm-bearings.v1" then
+        .secondmate_reconcile |= map(select(.id == $id and (.host // "") == $host))
+      else
+        .secondmate_current.records |= map(select(.id == $id and (.home // "") == $home and (.host // "") == $host))
+      end
+    ' "$tmp" > "$pending" || ! chmod 600 "$pending"; then
+      rm -f -- "$tmp" "$pending"
+      fail "cannot prepare the reconcile notify request"
+    fi
+    final="$REQUEST_DIR/request-$key.json"
+    if ! mv -f -- "$pending" "$final"; then
+      rm -f -- "$tmp" "$pending"
+      fail "cannot publish the reconcile notify request"
+    fi
+    printf 'requested: %s\n' "$final"
+    published=$((published + 1))
+  done <<EOF
+$targets
+EOF
+  rm -f -- "$tmp"
+  [ "$published" -gt 0 ] || fail "cannot identify reconcile notify targets"
 }
 
 cmd_process_requests() {
@@ -328,7 +382,11 @@ cmd_process_requests() {
         deferred=$((deferred + 1))
       fi
     else
-      mv -f -- "$claimed" "$original" 2>/dev/null || true
+      if ln "$claimed" "$original" 2>/dev/null; then
+        rm -f -- "$claimed" 2>/dev/null || true
+      elif [ -f "$original" ] && [ ! -L "$original" ]; then
+        rm -f -- "$claimed" 2>/dev/null || true
+      fi
       deferred=$((deferred + 1))
     fi
   done

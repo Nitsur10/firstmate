@@ -735,6 +735,99 @@ test_reconcile_request_rejects_an_unbounded_input_without_filling_storage() {
   pass "reconcile requests stop oversized streams at the capture bound"
 }
 
+test_reconcile_requests_coalesce_per_target_until_delivery() {
+  local home mate fakebin second_mate second_abs snap requests remaining out i ready_a ready_b ready_b2 release_a release_b release_b2 holder_a holder_b holder_b2
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home coalesced-requests coalesce-a)
+  second_mate="$TMP_ROOT/coalesced-requests-mate-b"
+  seed_secondmate_home_marker "$second_mate" coalesce-b
+  second_abs=$(cd "$second_mate" && pwd -P)
+  printf -- '- coalesce-b - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-08-26)\n' \
+    "$second_abs" >> "$home/data/secondmates.md"
+  cat > "$home/state/coalesce-b.meta" <<META
+window=firstmate:fm-coalesce-b
+kind=secondmate
+harness=claude
+backend=tmux
+spawn_gen=spawn-coalesce-b
+home=$second_abs
+worktree=$second_abs
+META
+  snap="$home/coalesced-snapshot.json"
+  write_snapshot "$snap" coalesce-a '{"kind":"orphan_in_flight","ids":["a-1"]}'
+  jq '.secondmate_current.records += [(.secondmate_current.records[0]
+    | .id = "coalesce-b"
+    | .home = "/tmp/coalesce-b"
+    | .spawn_gen = "spawn-coalesce-b"
+    | .reconcile_inventory.ids = ["b-1"]
+    | .invalidity.ids = ["b-1"])]' "$snap" > "$snap.next"
+  mv "$snap.next" "$snap"
+
+  i=0
+  while [ "$i" -lt 4 ]; do
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      "$RECONCILE" request --snapshot "$snap" >/dev/null \
+      || fail "a repeated reconcile request could not be published"
+    i=$((i + 1))
+  done
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "repeated requests did not coalesce to one pending file per target"
+
+  out="$home/process.out"
+  ready_a="$home/lock-a-ready"
+  ready_b="$home/lock-b-ready"
+  release_a="$home/lock-a-release"
+  release_b="$home/lock-b-release"
+  hold_lock_until_released "$home/state/.coalesce-a.reconcile.lock" "$ready_a" "$release_a" &
+  holder_a=$!
+  hold_lock_until_released "$home/state/.coalesce-b.reconcile.lock" "$ready_b" "$release_b" &
+  holder_b=$!
+  while [ ! -f "$ready_a" ] || [ ! -f "$ready_b" ]; do sleep 0.01; done
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      FM_FAKE_TMUX_WINDOW='' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+      "$RECONCILE" process-requests > "$out"; then
+    : > "$release_a"
+    : > "$release_b"
+    wait "$holder_a" 2>/dev/null || true
+    wait "$holder_b" 2>/dev/null || true
+    fail "failed reconcile deliveries unexpectedly retired their requests"
+  fi
+  : > "$release_a"
+  : > "$release_b"
+  wait "$holder_a" 2>/dev/null || true
+  wait "$holder_b" 2>/dev/null || true
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "failed delivery did not preserve one request per target"
+
+  ready_b2="$home/lock-b2-ready"
+  release_b2="$home/lock-b2-release"
+  hold_lock_until_released "$home/state/.coalesce-b.reconcile.lock" "$ready_b2" "$release_b2" &
+  holder_b2=$!
+  while [ ! -f "$ready_b2" ]; do sleep 0.01; done
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-coalesce-a' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+    "$RECONCILE" process-requests > "$out" 2>&1 || true
+  : > "$release_b2"
+  wait "$holder_b2" 2>/dev/null || true
+  [ -s "$home/state/coalesce-a.reconcile-nudged" ] \
+    || fail "successful delivery did not commit the first target cooldown"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 1 ] || fail "successful delivery did not retire only its target request"
+  remaining=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' -print -quit)
+  jq -e '.secondmate_current.records | length == 1 and .[0].id == "coalesce-b"' "$remaining" >/dev/null \
+    || fail "delivery of one target did not preserve the other target independently"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-coalesce-b' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+    "$RECONCILE" process-requests > "$out" 2>&1 \
+    || fail "the remaining target request could not be delivered"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 0 ] || fail "successful delivery did not clear the remaining coalesced request"
+  pass "reconcile requests coalesce per target and retire independently after delivery"
+}
+
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later() {
   local home rhome fakebin snap warm started elapsed watcher i requests beat_before beat_after processing beacon_advanced=0
   fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-offpath")
@@ -842,6 +935,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 }
 
 test_reconcile_request_rejects_an_unbounded_input_without_filling_storage
+test_reconcile_requests_coalesce_per_target_until_delivery
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
