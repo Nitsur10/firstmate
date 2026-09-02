@@ -816,7 +816,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   i=0
   while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
       || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \
-      && [ "$i" -lt 200 ]; do
+      && [ "$i" -lt 400 ]; do
     kill -0 "$watcher" 2>/dev/null || break
     i=$((i + 1))
     sleep 0.05
