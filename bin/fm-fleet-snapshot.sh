@@ -1006,11 +1006,11 @@ summary_file_read() {  # <file> <expected-home>
     ''|*[!0-9]*) rm -f -- "$captured"; return 1 ;;
   esac
   if [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ] \
-    || ! jq -e --arg home "$home" -f "$SNAPSHOT_SUMMARY_FILTER" "$captured" >/dev/null 2>&1; then
+    || ! jq -e -s --arg home "$home" -f "$SNAPSHOT_SUMMARY_FILTER" "$captured" >/dev/null 2>&1; then
     rm -f -- "$captured"
     return 1
   fi
-  jq -c . "$captured"
+  jq -c -s '.[0]' "$captured"
   bytes=$?
   rm -f -- "$captured"
   return "$bytes"
@@ -1084,15 +1084,17 @@ prepare_remote_summary_collection() {  # <sampled-row-json-lines>
   SNAPSHOT_COLLECT_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-ledgers.XXXXXX") || return 1
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
-.schema == "fm-secondmate-home-summary.v1" and .home == $home
-and (.generated | type) == "string"
-and (.generated_epoch | type) == "number" and .generated_epoch >= 0 and (.generated_epoch | floor) == .generated_epoch
-and (.valid | type) == "boolean" and (.state | type) == "string"
-and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
-and (.active_children | type) == "array" and (.decisions_open | type) == "array"
-and (.holds | type) == "array" and (.queued | type) == "array"
-and (.landed | type) == "array" and (.endpoints | type) == "array"
-and (.counts | type) == "object" and (.omitted | type) == "array"
+length == 1 and (.[0] |
+  .schema == "fm-secondmate-home-summary.v1" and .home == $home
+  and (.generated | type) == "string"
+  and (.generated_epoch | type) == "number" and .generated_epoch >= 0 and (.generated_epoch | floor) == .generated_epoch
+  and (.valid | type) == "boolean" and (.state | type) == "string"
+  and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
+  and (.active_children | type) == "array" and (.decisions_open | type) == "array"
+  and (.holds | type) == "array" and (.queued | type) == "array"
+  and (.landed | type) == "array" and (.endpoints | type) == "array"
+  and (.counts | type) == "object" and (.omitted | type) == "array"
+)
 JQ
   snapshot_cache_prepare || true
   manifest="$SNAPSHOT_COLLECT_DIR/manifest.jsonl"
@@ -1132,7 +1134,7 @@ valid_summary() {  # <file> <home>
   bytes=$(LC_ALL=C wc -c < "$file" | tr -d ' ')
   case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
   [ "$bytes" -le "$max_bytes" ] || return 1
-  jq -e --arg home "$home" -f "$filter" "$file" >/dev/null 2>&1
+  jq -e -s --arg home "$home" -f "$filter" "$file" >/dev/null 2>&1
 }
 
 bounded_collect() {  # <output> <error> <command...>

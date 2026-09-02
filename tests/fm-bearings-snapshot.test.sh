@@ -2042,7 +2042,7 @@ EOF
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
-  local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid
+  local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid duplicate_base
   parent=$(make_home concurrent-remote-ledgers)
   make_remote_ledger_fleet "$parent" 5
   fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
@@ -2059,6 +2059,19 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
   ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages: $json"
+
+  duplicate_base="$TMP_ROOT/remote-ledger-home-1/state/home-summary.single"
+  cp "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json" "$duplicate_base"
+  cat "$duplicate_base" "$duplicate_base" > "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json"
+  : > "$parent/ledger-calls.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached" and .age_seconds == 100)] | length) == 1
+      and ([.secondmates[] | select(.id != "ledger-1" and .freshness == "fresh")] | length) == 4
+  ' >/dev/null || fail "a multi-document live ledger bypassed the valid cache: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "rejecting a multi-document live ledger added remote reads"
+  mv "$duplicate_base" "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json"
 
   : > "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
   : > "$parent/ledger-calls.log"
