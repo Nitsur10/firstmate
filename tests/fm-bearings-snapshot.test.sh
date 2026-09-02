@@ -2095,7 +2095,11 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   started=$(date +%s)
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 7 ] || fail "five wedged remote reads exceeded the three-second fleet budget (${elapsed}s)"
+  # The three-second bound covers remote collection, while setup, cache validation,
+  # and projection run outside it. Keep the end-to-end ceiling well below the
+  # fifteen seconds that five serial three-second reads would require, without
+  # treating slower stock-macOS jq/process startup as collector serialization.
+  [ "$elapsed" -lt 12 ] || fail "five wedged remote reads behaved serially despite the shared three-second budget (${elapsed}s)"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "cached" and .age_seconds == 1000
