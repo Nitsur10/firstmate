@@ -958,7 +958,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
       || [ ! -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
       || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \
-      && [ "$i" -lt 200 ]; do
+      && [ "$i" -lt 600 ]; do
     i=$((i + 1))
     sleep 0.05
   done

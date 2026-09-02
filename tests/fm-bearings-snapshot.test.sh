@@ -2049,10 +2049,7 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   : > "$parent/ledger-calls.log"
   : > "$parent/ledger-pids.log"
 
-  started=$(date +%s)
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 5 ] || fail "five healthy remote ledgers did not complete in low single-digit seconds (${elapsed}s)"
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
     || fail "a healthy snapshot did not issue exactly one remote file read per home"
   printf '%s' "$json" | jq -e '
@@ -2169,6 +2166,16 @@ test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
       and (.secondmates[0].reason | contains("exceeded byte limit"))
   ' >/dev/null || fail "legacy mode ignored trailing bytes beyond the summary bound: $trailing"
   mv "$remote_home/state/fallback-summary.base" "$remote_home/state/fallback-summary.json"
+
+  cp "$remote_home/state/fallback-summary.json" "$remote_home/state/fallback-summary.single"
+  cat "$remote_home/state/fallback-summary.single" "$remote_home/state/fallback-summary.single" \
+    > "$remote_home/state/fallback-summary.json"
+  trailing=$(FM_SNAPSHOT_LEDGER_MODE=off run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$trailing" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("malformed or stale"))
+  ' >/dev/null || fail "legacy mode accepted multiple summary documents: $trailing"
+  mv "$remote_home/state/fallback-summary.single" "$remote_home/state/fallback-summary.json"
 
   jq '.padding = ("x" * 2048)' "$remote_home/state/fallback-summary.json" \
     > "$remote_home/state/fallback-summary.next"

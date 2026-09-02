@@ -1584,19 +1584,21 @@ secondmate_current_json() {  # <parent-tasks-json>
         reason="structured home snapshot exceeded byte limit"
       elif [ "$summary_rc" -ne 0 ]; then
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
-      elif ! jq -e --arg home "$home" '
-        .schema == "fm-secondmate-home-summary.v1" and .home == $home
-        and (.generated_epoch | type) == "number"
-        and (.valid | type) == "boolean" and (.state | type) == "string"
-        and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
-        and (.active_children | type) == "array" and (.decisions_open | type) == "array"
-        and (.holds | type) == "array" and (.queued | type) == "array"
-        and (.landed | type) == "array" and (.endpoints | type) == "array"
-        and (.counts | type) == "object" and (.omitted | type) == "array"
+      elif ! jq -e -s --arg home "$home" '
+        length == 1 and (.[0] |
+          .schema == "fm-secondmate-home-summary.v1" and .home == $home
+          and (.generated_epoch | type) == "number"
+          and (.valid | type) == "boolean" and (.state | type) == "string"
+          and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
+          and (.active_children | type) == "array" and (.decisions_open | type) == "array"
+          and (.holds | type) == "array" and (.queued | type) == "array"
+          and (.landed | type) == "array" and (.endpoints | type) == "array"
+          and (.counts | type) == "object" and (.omitted | type) == "array"
+        )
       ' "$legacy_file" >/dev/null 2>&1; then
         reason="structured home snapshot was malformed or stale"
       else
-        summary=$(jq -c . "$legacy_file") || reason="structured home snapshot was malformed or stale"
+        summary=$(jq -c -s '.[0]' "$legacy_file") || reason="structured home snapshot was malformed or stale"
         if [ -z "$reason" ]; then
           summary_age=$(snapshot_summary_age "$summary")
           summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
