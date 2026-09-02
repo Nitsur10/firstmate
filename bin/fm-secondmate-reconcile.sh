@@ -243,7 +243,7 @@ request_dir_prepare() {
 }
 
 cmd_request() {
-  local snapshot_src='' tmp bytes targets target id home host key pending final published=0
+  local snapshot_src='' tmp bytes targets target id spawn_gen host key pending final published=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --snapshot) [ "$#" -ge 2 ] || fail "--snapshot needs a value"; snapshot_src=$2; shift 2 ;;
@@ -271,53 +271,57 @@ cmd_request() {
     rm -f -- "$tmp"
     fail "captured snapshot exceeds FM_RECONCILE_REQUEST_MAX_BYTES"
   fi
-  jq -e '
+  if ! jq -e -s '
+    length == 1
+    and (.[0].schema == "fm-bearings.v1" or .[0].schema == "fm-fleet-snapshot.v1")
+  ' "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp"
+    fail "input is not exactly one fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+  fi
+  if ! jq -e '
     if .schema == "fm-bearings.v1" then
       any((.secondmate_reconcile // [])[];
         .kind as $kind
         | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
-    elif .schema == "fm-fleet-snapshot.v1" then
+    else
       any((.secondmate_current.records // [])[];
         .reconcile_inventory as $inv
         | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($inv.kind))
-    else false end
-  ' "$tmp" >/dev/null 2>&1 || {
-    if jq -e '.schema == "fm-bearings.v1" or .schema == "fm-fleet-snapshot.v1"' "$tmp" >/dev/null 2>&1; then
-      rm -f -- "$tmp"
-      printf 'not-needed\n'
-      return 0
-    fi
+    end
+  ' "$tmp" >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
-  }
+    printf 'not-needed\n'
+    return 0
+  fi
   targets=$(jq -c '
     [if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
-       | {id,home:"",host:(.host // ""),kind:(.kind // "")}
+       | {id,spawn_gen:(.spawn_gen // ""),host:(.host // ""),kind:(.kind // "")}
      else
        (.secondmate_current.records // [])[]
-       | {id,home:(.home // ""),host:(.host // ""),kind:(.reconcile_inventory.kind // "")}
+       | {id,spawn_gen:(.spawn_gen // ""),host:(.host // ""),kind:(.reconcile_inventory.kind // "")}
      end
      | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
-     | select((.home | type) == "string" and (.host | type) == "string")
+     | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]*$")))
+     | select((.host | type) == "string" and (.host | test("[[:cntrl:]]") | not))
      | .kind as $kind
      | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))]
-    | unique_by([.id,.home,.host])[]
+    | unique_by([.id,.spawn_gen,.host])[]
   ' "$tmp") || { rm -f -- "$tmp"; fail "cannot identify reconcile notify targets"; }
   while IFS= read -r target; do
     [ -n "$target" ] || continue
     id=$(printf '%s' "$target" | jq -r '.id') || continue
-    home=$(printf '%s' "$target" | jq -r '.home') || continue
+    spawn_gen=$(printf '%s' "$target" | jq -r '.spawn_gen') || continue
     host=$(printf '%s' "$target" | jq -r '.host') || continue
-    key=$(request_target_key "$id" "$home" "$host") \
+    key=$(request_target_key "$id" "$spawn_gen" "$host") \
       || { rm -f -- "$tmp"; fail "cannot identify reconcile notify target"; }
     pending=$(umask 077; mktemp "$REQUEST_DIR/.request.XXXXXX") \
       || { rm -f -- "$tmp"; fail "cannot create a reconcile notify request"; }
-    if ! jq -c --arg id "$id" --arg home "$home" --arg host "$host" '
+    if ! jq -c --arg id "$id" --arg spawn_gen "$spawn_gen" --arg host "$host" '
       if .schema == "fm-bearings.v1" then
-        .secondmate_reconcile |= map(select(.id == $id and (.host // "") == $host))
+        .secondmate_reconcile |= map(select(.id == $id and (.spawn_gen // "") == $spawn_gen and (.host // "") == $host))
       else
-        .secondmate_current.records |= map(select(.id == $id and (.home // "") == $home and (.host // "") == $host))
+        .secondmate_current.records |= map(select(.id == $id and (.spawn_gen // "") == $spawn_gen and (.host // "") == $host))
       end
     ' "$tmp" > "$pending" || ! chmod 600 "$pending"; then
       rm -f -- "$tmp" "$pending"

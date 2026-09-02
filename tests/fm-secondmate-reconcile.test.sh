@@ -735,8 +735,26 @@ test_reconcile_request_rejects_an_unbounded_input_without_filling_storage() {
   pass "reconcile requests stop oversized streams at the capture bound"
 }
 
+test_reconcile_request_requires_one_snapshot_document() {
+  local home snap quiet stream files
+  { read -r home; read -r _; read -r _; } < <(make_main_home single-request-document single-document-mate)
+  snap="$home/mismatch.json"
+  quiet="$home/quiet.json"
+  stream="$home/stream.json"
+  write_snapshot "$snap" single-document-mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  write_snapshot "$quiet" single-document-mate '{"kind":null,"ids":[]}'
+  cat "$snap" "$quiet" > "$stream"
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      "$RECONCILE" request --snapshot "$stream" > "$home/request.out" 2> "$home/request.err"; then
+    fail "a multi-document reconcile request was accepted"
+  fi
+  files=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$files" -eq 0 ] || fail "a multi-document request published partial durable work"
+  pass "reconcile requests require exactly one snapshot document"
+}
+
 test_reconcile_requests_coalesce_per_target_until_delivery() {
-  local home mate fakebin second_mate second_abs snap requests remaining out i ready_a ready_b ready_b2 release_a release_b release_b2 holder_a holder_b holder_b2
+  local home mate fakebin second_mate second_abs snap bearings requests remaining out i ready_a ready_b ready_b2 release_a release_b release_b2 holder_a holder_b holder_b2
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home coalesced-requests coalesce-a)
   second_mate="$TMP_ROOT/coalesced-requests-mate-b"
   seed_secondmate_home_marker "$second_mate" coalesce-b
@@ -771,6 +789,18 @@ META
   done
   requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
   [ "$requests" -eq 2 ] || fail "repeated requests did not coalesce to one pending file per target"
+  bearings="$home/coalesced-bearings.json"
+  jq '{schema:"fm-bearings.v1",secondmate_reconcile:[.secondmate_current.records[] | {
+    id,spawn_gen,host:(.host // null),kind:.reconcile_inventory.kind,ids:.reconcile_inventory.ids}]}' \
+    "$snap" > "$bearings"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$bearings" >/dev/null \
+    || fail "the equivalent Bearings request could not be published"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "equivalent fleet and Bearings requests used different target keys"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$snap" >/dev/null \
+    || fail "the fleet request could not replace its Bearings representation"
 
   out="$home/process.out"
   ready_a="$home/lock-a-ready"
@@ -935,6 +965,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 }
 
 test_reconcile_request_rejects_an_unbounded_input_without_filling_storage
+test_reconcile_request_requires_one_snapshot_document
 test_reconcile_requests_coalesce_per_target_until_delivery
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
