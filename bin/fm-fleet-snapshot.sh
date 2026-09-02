@@ -1611,6 +1611,10 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       rm -f -- "$legacy_file"
     fi
+    # Failed command substitutions clear their assignment target. Keep the
+    # unsampled fallback record's --argjson input valid without retaining any
+    # rejected or oversized summary fragment.
+    if [ -n "$reason" ]; then summary='{}'; fi
     if [ -z "$reason" ]; then
       summary_sampled=true
       summary_valid=$(printf '%s' "$summary" | jq -r '.valid')

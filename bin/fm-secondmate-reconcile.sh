@@ -24,10 +24,13 @@
 #
 # What this script owns:
 #   - the durable one-shot request queue under state/reconcile-notify. Bearings
-#     records a captured snapshot there and returns without sending. The watcher
-#     later runs process-requests, which claims each request, invokes the normal
-#     notify path, retires delivered or stale requests, and preserves skipped or
-#     failed requests for another supervision pass;
+#     supplies exactly one captured snapshot document and returns without sending.
+#     Publication keeps at most one pending request per stable target id: a newer
+#     snapshot replaces that target's payload across schema, relaunch, or route
+#     changes without disturbing other targets. The watcher later runs
+#     process-requests, which claims each request, invokes the normal notify path,
+#     retires delivered or stale requests, and preserves skipped or failed requests
+#     for another supervision pass;
 #   - reading the mismatch from an already-produced fleet snapshot, so nothing
 #     here re-parses another home's state or runs a second child summary;
 #   - the cooldown. One durable per-home timestamp records the last nudge, and a
@@ -124,8 +127,10 @@ usage: fm-secondmate-reconcile.sh request --snapshot <file>|-
        fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
        fm-secondmate-reconcile.sh nudged <mate-id>
 
-request  atomically record one captured mismatched-home snapshot for later
-         supervision delivery. It never sends or takes mate lifecycle locks.
+request  accept exactly one captured snapshot and atomically publish at most
+         one pending request per stable reconcile target id for later supervision
+         delivery. Newer payloads replace that target's pending request without
+         disturbing other targets. It never sends or takes mate lifecycle locks.
 process-requests
          deliver and retire durable requests. Intended for the watcher loop;
          skipped or failed requests stay queued for a later pass.
