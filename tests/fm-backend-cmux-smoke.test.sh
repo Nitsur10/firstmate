@@ -8,9 +8,10 @@
 # cmux is one shared, GUI-first, macOS-only instance (the same posture as
 # Orca). So this test creates ONLY `fm-test-`-prefixed task labels, touches and
 # closes ONLY what it created, never enumerates-and-closes, never quits or
-# relaunches the app, and cleans up every artifact via
-# tests/cmux-test-safety.sh's guarded close. The adapter turns those plain
-# labels into home-scoped cmux workspace titles internally.
+# relaunches the app, and closes every workspace it created via
+# tests/cmux-test-safety.sh's guarded close (cleanup_all below owns the
+# ownership proof and the one deliberately retained temp root). The adapter
+# turns those plain labels into home-scoped cmux workspace titles internally.
 #
 # Skips cleanly when cmux (or jq) is not installed/reachable, so CI/dev
 # machines without cmux, or without the one-time password-mode setup
