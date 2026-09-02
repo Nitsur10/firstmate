@@ -813,11 +813,14 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   done
   [ "$beacon_advanced" -eq 1 ] \
     || fail "the watcher beacon stalled behind delayed reconcile delivery"
+  # Delivery is detached from the watcher loop.
+  # Observe the durable lifecycle itself rather than using watcher liveness as a proxy.
+  # A watcher may exit after it has launched the delivery child.
   i=0
   while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
+      || [ ! -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
       || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \
-      && [ "$i" -lt 400 ]; do
-    kill -0 "$watcher" 2>/dev/null || break
+      && [ "$i" -lt 200 ]; do
     i=$((i + 1))
     sleep 0.05
   done
@@ -825,8 +828,10 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   wait "$watcher" 2>/dev/null || true
   [ -n "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
     || fail "supervision did not deliver the durable reconcile request later: $(cat "$home/watch.err")"
+  [ -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
+    || fail "the delivered reconcile request did not commit its cooldown: $(cat "$home/watch.err")"
   requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')
-  [ "$requests" -eq 0 ] || fail "the delivered one-shot reconcile request was not retired"
+  [ "$requests" -eq 0 ] || fail "the delivered one-shot reconcile request was not retired: $(cat "$home/watch.err")"
   for lock in \
     "$home/state/.remote-offpath-mate.reconcile.lock" \
     "$home/state/.control-remote-offpath-mate.lock" \
