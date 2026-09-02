@@ -993,13 +993,27 @@ SNAPSHOT_SUMMARY_FILTER=
 SNAPSHOT_CACHE_AVAILABLE=0
 SNAPSHOT_COLLECTION_TIMED_OUT=0
 
-summary_file_valid() {  # <file> <expected-home>
-  local file=$1 home=$2 bytes
+summary_file_read() {  # <file> <expected-home>
+  local file=$1 home=$2 captured bytes
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  bytes=$(LC_ALL=C wc -c < "$file" | tr -d ' ')
-  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$bytes" -le "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ] || return 1
-  jq -e --arg home "$home" -f "$SNAPSHOT_SUMMARY_FILTER" "$file" >/dev/null 2>&1
+  captured=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.selected-summary.XXXXXX") || return 1
+  if ! LC_ALL=C head -c "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$file" > "$captured"; then
+    rm -f -- "$captured"
+    return 1
+  fi
+  bytes=$(LC_ALL=C wc -c < "$captured" | tr -d ' ')
+  case "$bytes" in
+    ''|*[!0-9]*) rm -f -- "$captured"; return 1 ;;
+  esac
+  if [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ] \
+    || ! jq -e --arg home "$home" -f "$SNAPSHOT_SUMMARY_FILTER" "$captured" >/dev/null 2>&1; then
+    rm -f -- "$captured"
+    return 1
+  fi
+  jq -c . "$captured"
+  bytes=$?
+  rm -f -- "$captured"
+  return "$bytes"
 }
 
 summary_file_oversized() {  # <file>
@@ -1052,13 +1066,13 @@ snapshot_route_cache_path() {  # <id> <host> <home>
   printf '%s/%s.json\n' "$FM_SNAPSHOT_CACHE_DIR" "$key"
 }
 
-snapshot_cache_store() {  # <source> <destination>
-  local source=$1 destination=$2 tmp
+snapshot_cache_store() {  # <summary-json> <destination>
+  local summary=$1 destination=$2 tmp
   [ "$SNAPSHOT_CACHE_AVAILABLE" -eq 1 ] || return 1
   case "$destination" in "$FM_SNAPSHOT_CACHE_DIR"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
   tmp=$(umask 077; mktemp "$FM_SNAPSHOT_CACHE_DIR/.summary.XXXXXX") || return 1
-  if cp "$source" "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$destination"; then
+  if printf '%s\n' "$summary" > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$destination"; then
     return 0
   fi
   rm -f -- "$tmp"
@@ -1179,9 +1193,9 @@ BASH
   return 0
 }
 
-snapshot_summary_age() {  # <summary-file>
+snapshot_summary_age() {  # <summary-json>
   local generated age
-  generated=$(jq -r '.generated_epoch' "$1" 2>/dev/null || true)
+  generated=$(printf '%s' "$1" | jq -r '.generated_epoch' 2>/dev/null || true)
   case "$generated" in ''|*[!0-9]*) printf 'null\n'; return ;; esac
   age=$((SNAPSHOT_EPOCH - generated))
   [ "$age" -lt 0 ] && age=0
@@ -1491,15 +1505,15 @@ secondmate_current_json() {  # <parent-tasks-json>
         cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)
-        if summary_file_valid "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home"; then
+        if summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home"); then
           summary_file="$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"
           summary_source='remote-ledger'
-          [ -z "$cache_path" ] || snapshot_cache_store "$summary_file" "$cache_path" || true
-        elif [ -n "$cache_path" ] && summary_file_valid "$cache_path" "$home"; then
+          [ -z "$cache_path" ] || snapshot_cache_store "$summary" "$cache_path" || true
+        elif [ -n "$cache_path" ] && summary=$(summary_file_read "$cache_path" "$home"); then
           summary_file=$cache_path
           summary_source='remote-ledger-cache'
           summary_freshness=cached
-        elif summary_file_valid "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback" "$home"; then
+        elif summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback" "$home"); then
           summary_file="$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback"
           summary_source='legacy-remote-summary'
           summary_freshness=fresh
@@ -1511,7 +1525,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           reason="structured home snapshot failed"
         fi
       else
-        if summary_file_valid "$home/state/home-summary.json" "$home"; then
+        if summary=$(summary_file_read "$home/state/home-summary.json" "$home"); then
           summary_file="$home/state/home-summary.json"
           summary_source='local-ledger'
         else
@@ -1532,7 +1546,7 @@ secondmate_current_json() {  # <parent-tasks-json>
             FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
             "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
             > "$fallback_file" 2>/dev/null || summary_rc=$?
-          if [ "$summary_rc" -eq 0 ] && summary_file_valid "$fallback_file" "$home"; then
+          if [ "$summary_rc" -eq 0 ] && summary=$(summary_file_read "$fallback_file" "$home"); then
             summary_file=$fallback_file
             summary_source='legacy-local-summary'
             summary_freshness=fresh
@@ -1546,11 +1560,8 @@ secondmate_current_json() {  # <parent-tasks-json>
         fi
       fi
       if [ -z "$reason" ]; then
-        summary=$(jq -c . "$summary_file") || reason="structured home snapshot was malformed or stale"
-        if [ -z "$reason" ]; then
-          summary_age=$(snapshot_summary_age "$summary_file")
-          summary_observed=$(jq -r '.generated' "$summary_file")
-        fi
+        summary_age=$(snapshot_summary_age "$summary")
+        summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
       fi
     elif [ -z "$reason" ]; then
       legacy_file=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/legacy-summary.XXXXXX") || return 1
@@ -1591,8 +1602,8 @@ secondmate_current_json() {  # <parent-tasks-json>
       else
         summary=$(jq -c . "$legacy_file") || reason="structured home snapshot was malformed or stale"
         if [ -z "$reason" ]; then
-          summary_age=$(snapshot_summary_age "$legacy_file")
-          summary_observed=$(jq -r '.generated' "$legacy_file")
+          summary_age=$(snapshot_summary_age "$summary")
+          summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
           summary_freshness=fresh
         fi
       fi
