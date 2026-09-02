@@ -1401,6 +1401,17 @@ home_summary_refresh_detached() {
 }
 
 RECONCILE_REQUEST_PID=
+reconcile_requests_pending() {
+  local request
+  [ -d "$STATE/reconcile-notify" ] && [ ! -L "$STATE/reconcile-notify" ] || return 1
+  for request in \
+    "$STATE/reconcile-notify"/.processing-request-*.json \
+    "$STATE/reconcile-notify"/request-*.json; do
+    [ -f "$request" ] && [ ! -L "$request" ] && return 0
+  done
+  return 1
+}
+
 reconcile_requests_detached() {
   if [ -n "$RECONCILE_REQUEST_PID" ]; then
     if kill -0 "$RECONCILE_REQUEST_PID" 2>/dev/null; then
@@ -1511,7 +1522,7 @@ while :; do
   # Bearings publishes reconcile asks as local one-shot request files and
   # returns before any mate delivery. Supervision owns their later delivery;
   # a skipped or failed request remains durable for another poll.
-  if [ -d "$STATE/reconcile-notify" ]; then
+  if reconcile_requests_pending; then
     reconcile_requests_detached
   fi
 
