@@ -220,6 +220,10 @@ SM_ID="test-2ndmate-smoke"
 # fallback can prove ownership: only an id that first appears after this point
 # may be adopted for closing.
 SM_WS_BEFORE=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r '.workspaces[]?.id' 2>/dev/null || true)
+case "$SM_WS_BEFORE" in
+  *"$WS2"*) : ;;
+  *) fail "real cmux: pre-spawn workspace snapshot did not include the live smoke2 workspace $WS2 (workspace list read failed), so the cleanup fallback cannot prove ownership" ;;
+esac
 SM_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-sm-smoke.XXXXXX")
 mkdir -p "$SM_TMP/home/state" "$SM_TMP/home/data" "$SM_TMP/home/config" "$SM_TMP/home/projects" \
   "$SM_TMP/sm-home/bin" "$SM_TMP/sm-home/data"
