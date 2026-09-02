@@ -40,26 +40,30 @@ WS1=""
 WS2=""
 WS3=""
 SM_TMP=""
-SM_TASK_TMP_FRESH=0
+SM_WS_BEFORE=""
 cleanup_all() {
   [ -z "$WS1" ] || cmux_safe_close_workspace "$WS1" "fm-test-smoke1"
   [ -z "$WS2" ] || cmux_safe_close_workspace "$WS2" "fm-test-smoke2"
   if [ -n "$SM_TMP" ]; then
     # A partial fm-spawn failure can create the real workspace before its ids
-    # are published to meta, leaving WS3 unset; resolve the workspace by its
-    # scoped fm-test- title so the leak is still reclaimed. The guarded close
-    # re-verifies the exact live title either way.
+    # are published to meta, leaving WS3 unset. Resolve it by its scoped
+    # fm-test- title, but only adopt an id ABSENT from the pre-spawn snapshot:
+    # such an id, carrying this run's scoped test title, can only have been
+    # created by this run's spawn, so ownership holds without trusting the
+    # reusable title alone. A title match that was already live before the
+    # spawn is a leftover this run did not create - leave it in place.
     if [ -z "$WS3" ]; then
       WS3=$(fm_backend_cmux_workspace_id_for_label "$(fm_backend_cmux_scoped_title "fm-test-2ndmate-smoke")" 2>/dev/null || true)
+      case "$SM_WS_BEFORE" in
+        *"$WS3"*) WS3="" ;;
+      esac
     fi
     [ -z "$WS3" ] || cmux_safe_close_workspace "$WS3" "fm-test-2ndmate-smoke"
     rm -rf "$SM_TMP"
-    # fm-spawn.sh creates the task's own /tmp/fm-<id> temp root; remove it only
-    # when this run observed it absent beforehand, never a pre-existing path
-    # this test does not own.
-    if [ "$SM_TASK_TMP_FRESH" -eq 1 ]; then
-      rm -rf /tmp/fm-test-2ndmate-smoke
-    fi
+    # fm-spawn.sh creates the task's own /tmp/fm-<id> temp root; it is
+    # deliberately left in place, because no ownership check on a shared /tmp
+    # path is free of check-to-delete races, and the empty per-task dirs are
+    # reclaimed by the OS tmp cleaner.
   fi
 }
 trap cleanup_all EXIT
@@ -212,7 +216,10 @@ pass "real cmux: list_live discovers a live task workspace by fm-<id> title"
 # secondmate HOME (not a project worktree), and the title carries the
 # launching primary's home label (bin/backends/cmux.sh "Secondmate shape").
 SM_ID="test-2ndmate-smoke"
-[ -e "/tmp/fm-$SM_ID" ] || SM_TASK_TMP_FRESH=1
+# Snapshot the live workspace ids before the spawn so cleanup_all's title-based
+# fallback can prove ownership: only an id that first appears after this point
+# may be adopted for closing.
+SM_WS_BEFORE=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r '.workspaces[]?.id' 2>/dev/null || true)
 SM_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-sm-smoke.XXXXXX")
 mkdir -p "$SM_TMP/home/state" "$SM_TMP/home/data" "$SM_TMP/home/config" "$SM_TMP/home/projects" \
   "$SM_TMP/sm-home/bin" "$SM_TMP/sm-home/data"
