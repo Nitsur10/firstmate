@@ -220,11 +220,11 @@ EOF
 request_target_key() {
   local digest
   if command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | shasum -a 256 | awk '{print $1}') || return 1
+    digest=$(printf '%s\n' "$1" | shasum -a 256 | awk '{print $1}') || return 1
   elif command -v sha256sum >/dev/null 2>&1; then
-    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | sha256sum | awk '{print $1}') || return 1
+    digest=$(printf '%s\n' "$1" | sha256sum | awk '{print $1}') || return 1
   elif command -v openssl >/dev/null 2>&1; then
-    digest=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
+    digest=$(printf '%s\n' "$1" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
   else
     return 1
   fi
@@ -313,7 +313,7 @@ cmd_request() {
     id=$(printf '%s' "$target" | jq -r '.id') || continue
     spawn_gen=$(printf '%s' "$target" | jq -r '.spawn_gen') || continue
     host=$(printf '%s' "$target" | jq -r '.host') || continue
-    key=$(request_target_key "$id" "$spawn_gen" "$host") \
+    key=$(request_target_key "$id") \
       || { rm -f -- "$tmp"; fail "cannot identify reconcile notify target"; }
     pending=$(umask 077; mktemp "$REQUEST_DIR/.request.XXXXXX") \
       || { rm -f -- "$tmp"; fail "cannot create a reconcile notify request"; }

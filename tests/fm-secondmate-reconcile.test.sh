@@ -801,6 +801,21 @@ META
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
     "$RECONCILE" request --snapshot "$snap" >/dev/null \
     || fail "the fleet request could not replace its Bearings representation"
+  jq '(.secondmate_current.records[] | select(.id == "coalesce-a") | .spawn_gen) = "spawn-coalesce-a-v2"' \
+    "$snap" > "$snap.next"
+  mv "$snap.next" "$snap"
+  awk '{ if ($0 ~ /^spawn_gen=/) print "spawn_gen=spawn-coalesce-a-v2"; else print }' \
+    "$home/state/coalesce-a.meta" > "$home/state/coalesce-a.meta.next"
+  mv "$home/state/coalesce-a.meta.next" "$home/state/coalesce-a.meta"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$snap" >/dev/null \
+    || fail "the relaunched target request could not replace its predecessor"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "a target relaunch created an additional pending request"
+  jq -s -e '[.[].secondmate_current.records[] | select(.id == "coalesce-a")]
+    | length == 1 and .[0].spawn_gen == "spawn-coalesce-a-v2"' \
+    "$home/state/reconcile-notify"/request-*.json >/dev/null \
+    || fail "the relaunched target did not replace its pending identity payload"
 
   out="$home/process.out"
   ready_a="$home/lock-a-ready"
