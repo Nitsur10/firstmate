@@ -773,6 +773,77 @@ SH
   chmod +x "$1/fakebin/claude"
 }
 
+# A fake claude and quota-axi for a Claude account pool: `claude auth status
+# --json` names the root's email file when the root holds a stored login, and
+# quota-axi serves the root's own quota.json.
+make_claude_pool_stub() {  # <case-dir>
+  cat > "$1/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0
+root=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+[ -f "$root/.credentials.json" ] || exit 1
+[ ! -f "$root/email" ] || printf '{"loggedIn":true,"email":"%s"}\n' "$(cat "$root/email")"
+SH
+  cat > "$1/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/quota.json" 2>/dev/null
+SH
+  chmod +x "$1/fakebin/claude" "$1/fakebin/quota-axi"
+}
+
+pool_member() {  # <root> <email> <weekly> <spendPriority>
+  mkdir -p "$1"
+  : > "$1/.credentials.json"
+  printf '%s\n' "$2" > "$1/email"
+  jq -n --arg email "$2" --argjson w "$3" --argjson sp "$4" '
+    {schemaVersion: 5, providers: [{provider: "claude", account: {email: $email}, state: {status: "fresh"},
+      windows: [{id: "five_hour", percentRemaining: 90}, {id: "seven_day", percentRemaining: $w}],
+      quotaSemantics: {effectiveAvailability: [{scope: "all_models", runway: {status: "through_reset"},
+        selection: {status: "known", spendPriority: $sp}}]}}]}' > "$1/quota.json"
+}
+
+test_claude_pool_relaunch_stays_on_its_account_while_eligible() {
+  local dir out rc id=rl-pool
+  dir=$(new_case pool "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_pool_stub "$dir"
+  mkdir -p "$dir/home/config"
+  pool_member "$dir/user-home/.claude" s@example.com 60 3.0
+  pool_member "$dir/max1" n@example.com 50 0.5
+  printf 'account=ordinary\naccount=%s\npages=ordinary\n' "$dir/max1" > "$dir/home/config/claude-accounts"
+  printf 'account=%s\n' "$dir/max1" >> "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --note "stay on the recorded account"); rc=$?
+  expect_code 0 "$rc" "a pooled relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/max1" ] \
+    || fail "an eligible recorded account should keep the relaunch even when another ranks higher"
+  [ "$(meta_field "$dir" "$id" account_email)" = n@example.com ] || fail "the relaunched record should carry the login"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/max1'" "the replacement should launch on the recorded account"
+
+  pool_member "$dir/max1" n@example.com 5 0.5
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "recorded account under its floor"); rc=$?
+  expect_code 0 "$rc" "a pooled relaunch off an ineligible account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = ordinary ] || fail "a relaunch should move off an account under its floor"
+  assert_contains "$(cat "$dir/fake/literal")" "-u CLAUDE_CONFIG_DIR" "the replacement should launch on the ordinary login"
+
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --account N@example.com --note "captain named the account"); rc=$?
+  expect_code 0 "$rc" "a relaunch with --account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/max1" ] || fail "--account should choose the named login for the replacement"
+
+  rm "$dir/user-home/.claude/.credentials.json"
+  printf 'claude' > "$dir/fake/command"
+  : > "$dir/fake/literal"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --note "no usable account"); rc=$?
+  expect_code 1 "$rc" "a pooled relaunch with no usable account must refuse"
+  assert_contains "$out" "config/claude-accounts has no account a launch may use" "the refusal should name the pool"
+  assert_not_contains "$out" "note: Claude account pool" "the pre-stop check should leave pool notes to the launch owner"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a pool with no usable account must refuse before the running agent stops"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  pass "fm-control relaunch: a pooled task stays on its recorded account while eligible, moves when it is not, and honours --account"
+}
+
 test_signed_out_worker_account_pin_refuses_before_stop() {
   local dir out rc id=rl-acct-out
   dir=$(new_case acct-out "$id")
@@ -2403,6 +2474,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_claude_pool_relaunch_stays_on_its_account_while_eligible
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

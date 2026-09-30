@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [Claude account pool](#claude-account-pool-configclaude-accounts), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -889,6 +889,76 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+## Claude account pool (config/claude-accounts)
+
+A home with more than one Claude login can let each Claude worker launch take whichever pooled login has the most usable runway, instead of pinning every launch to one.
+The pool is opt-in and applies only when `config/claude-account` is absent; with no pool file, every launch is unchanged, and a present pin always wins.
+The file is local and gitignored, and it is not inherited into secondmate homes.
+
+### File format
+
+The file holds `key=value` lines; blank lines and lines starting with `#` are ignored.
+
+| Key | Value | Default |
+| --- | --- | --- |
+| `account` | `ordinary` or the absolute path of a Claude config directory; one line per pooled login, at least one | none |
+| `pages` | one of the `account` values: the login that publishes and owns claude.ai pages | none |
+| `reserve` | weekly percent left that the `pages` account keeps back from worker launches | `20` |
+| `floor` | weekly percent left an account needs to take a new launch | `10` |
+| `five-hour-floor` | five-hour percent left an account needs to take a new launch | `15` |
+
+`ordinary` means the default login with `CLAUDE_CONFIG_DIR` unset, exactly as for the pin.
+For example:
+
+```text
+account=ordinary
+account=/Users/me/.claude-max1
+pages=ordinary
+reserve=20
+```
+
+An unknown key, a repeated key or account, a relative path, a percent outside 0 to 100, a `pages` value that is not also an `account`, or a control character other than a newline refuses every Claude launch from the home before anything is created.
+
+### Choosing an account
+
+At each Claude ship or scout launch, Firstmate probes every pooled account in the same cleared environment as the pin check.
+`claude auth status --json` must report the account signed in with an email, and one `quota-axi --provider claude --no-credential-refresh --max-age 5m --full --json` read, bounded to 20 seconds, reads that login's windows from its own macOS Keychain entry.
+The read never uses `--profile-only`, which reads only a credentials file that a Keychain-backed login does not have.
+
+An account is skipped, with a `note:` line naming the reason, when:
+
+- its directory is missing or unreadable, it is signed out, or it reports no email;
+- its email repeats an earlier account's, so one login is never counted twice;
+- its quota reading names a different email, which would mean the read fell back to another login;
+- its runway is exhausted, its five-hour window is under `five-hour-floor`, or its weekly window is under `floor`;
+- it is the `pages` account and its weekly window is under `reserve`.
+
+The eligible accounts rank by quota-axi's `all_models` `spendPriority`, the same use-it-or-lose-it score dispatch profiles use, then by weekly percent left, then by file order.
+An account whose quota cannot be read stays eligible, ranked after every account with a reading, and the note says so.
+The launch refuses only when every account is skipped.
+
+A secondmate launch and a raw Claude launch command take the `pages` account when one is declared, with only the sign-in check, so a session that may publish pages always runs on the account that owns them.
+A raw Claude launch command whose leading assignments set `CLAUDE_CONFIG_DIR` or a credential the launch unsets refuses, as under a pin.
+
+### Override, recording, and relaunch
+
+`bin/fm-spawn.sh --account <root|email>` and `bin/fm-control.sh <id> relaunch --account <root|email>` launch on the pooled account named by its `account` value or its signed-in email.
+The override skips the quota gates but not the sign-in check; a signed-out or unknown account refuses rather than moving elsewhere.
+`--account` refuses in a home without a pool, under a pin, and for a non-Claude harness.
+
+The chosen account is applied exactly as a pin's: the launch names the root, or unsets `CLAUDE_CONFIG_DIR` for `ordinary`, and sheds the environment credentials Claude ranks above a stored login.
+The spawned line and the task record carry `account=` and `account_email=`.
+
+A relaunch stays on the task's recorded account while that account remains eligible, and otherwise chooses again; a running conversation never changes account.
+A worker that should not publish claude.ai pages from a non-`pages` login is a brief-level instruction; the pool does not enforce it.
+
+### New profile parity
+
+A new `CLAUDE_CONFIG_DIR` is not a copy of `~/.claude`: it has its own `settings.json`, hooks, skills, and login.
+Before adding one to the pool, give it the same `settings.json` hooks and permissions, user-level skills, and `CLAUDE.md` as the default profile, by copying or symlinking them and never the credentials; otherwise workers launched on it run with fewer guardrails than the rest of the fleet.
+
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing and selection; `tests/fm-worker-account.test.sh` covers them.
 
 ## Lavish server address (config/lavish-axi-host)
 

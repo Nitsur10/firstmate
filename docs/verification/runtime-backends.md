@@ -617,6 +617,30 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Claude account pool identity and quota reads
+
+The Claude account pool in `bin/fm-worker-account-lib.sh` attributes each pooled root to a login from vendor output: the `loggedIn` and `email` fields of `claude auth status --json`, and the `providers[].account.email`, `windows[]`, and `quotaSemantics.effectiveAvailability[]` fields of `quota-axi --provider claude --no-credential-refresh --max-age 5m --full --json`.
+The same live guard proves the Claude half against synthetic roots: an empty root reports `loggedIn: false` and exits non-zero, and a root whose `settings.json` names an `apiKeyHelper` reports `loggedIn: true` with no `email`, which the pool skips as unattributable.
+
+Verified 2026-10-01 on Claude Code 2.1.285 and quota-axi 0.1.54 on macOS, against the default login with `CLAUDE_CONFIG_DIR` unset and identifiers redacted:
+
+```sh
+bash tests/fm-worker-account-live-e2e.test.sh
+claude auth status --json
+quota-axi --provider claude --no-credential-refresh --max-age 5m --full --json
+```
+
+```
+ok - claude 2.1.285 (Claude Code): the pool reads auth status JSON and skips a signed-out or unattributable root
+{"loggedIn": true, "authMethod": "claude.ai", "email": "<login>", "subscriptionType": "max", ...}
+{"schemaVersion": 5, "providers": [{"provider": "claude", "account": {"email": "<login>", "identityStatus": "verified", ...},
+  "attempts": [{"source": "keychain", "status": "success"}, ...],
+  "windows": [{"id": "five_hour", "percentRemaining": 91, ...}, {"id": "seven_day", "percentRemaining": 47, ...}, ...],
+  "quotaSemantics": {"effectiveAvailability": [{"scope": "all_models", "runway": {"status": "through_reset"}, "selection": {"status": "known", "spendPriority": 1.2508}, ...}, ...]}}]}
+```
+
+Whether quota-axi reads a second root's own Keychain entry, rather than falling back to the default login, was not observable with one login; the pool's email comparison is the guard for that case, and a second signed-in root should be checked the first time it joins a pool.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
