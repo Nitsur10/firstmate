@@ -824,6 +824,8 @@ test_claude_pool_relaunch_stays_on_its_account_while_eligible() {
   out=$(run_control "$dir" "$id" relaunch --note "recorded account under its floor"); rc=$?
   expect_code 0 "$rc" "a pooled relaunch off an ineligible account should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" "$id" account)" = ordinary ] || fail "a relaunch should move off an account under its floor"
+  [ "$(meta_field "$dir" "$id" account_email)" = s@example.com ] || fail "a relaunch that moves accounts should record the new login"
+  [ "$(grep -c '^account_email=' "$dir/home/state/$id.meta")" = 1 ] || fail "a relaunch should leave exactly one account_email line"
   assert_contains "$(cat "$dir/fake/literal")" "-u CLAUDE_CONFIG_DIR" "the replacement should launch on the ordinary login"
 
   : > "$dir/fake/literal"
