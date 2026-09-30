@@ -57,8 +57,8 @@
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
 # lock identity before and after close, and successor disposition. The separate
-# state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# state/.watch-triage.log remains exclusively the watcher's debug (absorbed wakes,
+# skipped custom checks) log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
