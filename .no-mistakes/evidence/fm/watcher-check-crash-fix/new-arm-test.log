@@ -1,0 +1,2 @@
+not ok - arm did not start a watcher: /Users/e8e/.no-mistakes/worktrees/79d357176832/01M3T2XSYZ8VWBQEDD1MQNBYEQ/bin/fm-watch-arm.sh: line 545: 40335 Terminated: 15          "$WATCH" > "$child_out" 2> >(tee -a "$WATCH_STDERR_LOG" >&2 2>/dev/null)
+watcher: FAILED - no live watcher with a fresh beacon

@@ -1,0 +1,7 @@
+ok - watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure
+ok - watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly
+ok - watch-arm: an unusable launch confirm window refuses to arm by name
+ok - watch-arm: a disposable validation checkout refuses to arm
+not ok - arm did not start a watcher: /Users/e8e/.no-mistakes/worktrees/79d357176832/01M3T2XSYZ8VWBQEDD1MQNBYEQ/bin/fm-watch-arm.sh: line 545: 74090 Terminated: 15          "$WATCH" > "$child_out" 2> >(tee -a "$WATCH_STDERR_LOG" >&2 2>/dev/null)
+watcher: FAILED - no live watcher with a fresh beacon
+bash tests/fm-watch-arm.test.sh  4.64s user 10.30s system 7% cpu 3:19.52 total

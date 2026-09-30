@@ -1,0 +1,1 @@
+ok - a custom check whose capture fails is logged and skipped while the watcher keeps running

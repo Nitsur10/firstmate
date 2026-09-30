@@ -1,0 +1,6 @@
+ok - watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure
+ok - watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly
+ok - watch-arm: an unusable launch confirm window refuses to arm by name
+ok - watch-arm: a disposable validation checkout refuses to arm
+not ok - watcher pid 76646 outlived its deleted state directory
+bash tests/fm-watch-arm.test.sh  5.61s user 12.31s system 6% cpu 4:41.81 total

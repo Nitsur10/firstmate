@@ -1,0 +1,1 @@
+ok - watch-arm: the watcher's stderr is kept in a bounded durable log and still passed through
