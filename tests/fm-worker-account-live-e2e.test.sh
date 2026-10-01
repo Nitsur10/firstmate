@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Default-on live guard for the worker account pin's sign-in check
-# (bin/fm-worker-account-lib.sh) against every installed runner it supports.
+# Default-on live guard for the worker account pin's sign-in check and the
+# Claude account pool's identity read (bin/fm-worker-account-lib.sh) against
+# every installed runner they support.
 #
 # The check's verdict comes from vendor output - the exit status of
 # `claude auth status`, the JSON of `pi auth check`, and the table of
@@ -34,7 +35,7 @@ unset CLAUDE_CONFIG_DIR PI_CODING_AGENT_DIR ANTHROPIC_API_KEY OPENAI_API_KEY FM_
 CHECKED=
 
 claude_live_cases() {
-  local version empty helper
+  local version empty helper out
   version=$(claude --version 2>/dev/null | head -1)
   empty="$TMP_ROOT/claude-empty"
   helper="$TMP_ROOT/claude-helper"
@@ -50,6 +51,21 @@ claude_live_cases() {
   fm_worker_account_check claude "$helper" "$helper" claude ||
     fail "claude $version: the pin check refused a root whose apiKeyHelper signs it in"
   pass "claude $version: the pin check accepts a signed-in root and refuses an empty one despite an ambient API key"
+
+  # The pool reads `claude auth status --json`: loggedIn false for an empty
+  # root, and loggedIn true with no email for a login it cannot attribute.
+  out=$(ANTHROPIC_API_KEY=sk-ant-fm-live-synthetic fm_worker_account_claude_email claude "$empty") &&
+    fail "claude $version: the pool accepted an empty root as $out because a credential variable in the caller answered for it"
+  [ "$out" = "not signed in (claude auth status)" ] ||
+    fail "claude $version: the pool read an empty root as '$out' rather than signed out"
+  out=$(env -i HOME="$HOME" PATH="$PATH" CLAUDE_CONFIG_DIR="$helper" claude auth status --json 2>/dev/null </dev/null)
+  [ "$(printf '%s\n' "$out" | jq -r '.loggedIn' 2>/dev/null)" = true ] ||
+    fail "claude $version: claude auth status --json no longer reports loggedIn for a signed-in root ($out); revisit bin/fm-worker-account-lib.sh"
+  out=$(fm_worker_account_claude_email claude "$helper") &&
+    fail "claude $version: the pool attributed an apiKeyHelper root to the email '$out'"
+  [ "$out" = "signed in without a verifiable email (claude auth status)" ] ||
+    fail "claude $version: the pool read an apiKeyHelper root as '$out'"
+  pass "claude $version: the pool reads auth status JSON and skips a signed-out or unattributable root"
   CHECKED="$CHECKED claude"
 }
 
