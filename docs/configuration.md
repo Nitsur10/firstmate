@@ -905,8 +905,6 @@ The file holds `key=value` lines; blank lines and lines starting with `#` are ig
 | `account` | `ordinary` or the absolute path of a Claude config directory; one line per pooled login, at least one | none |
 | `pages` | one of the `account` values: the login that publishes and owns claude.ai pages | none |
 | `reserve` | weekly percent left that the `pages` account keeps back from worker launches | `20` |
-| `floor` | weekly percent left an account needs to take a new launch | `10` |
-| `five-hour-floor` | five-hour percent left an account needs to take a new launch | `15` |
 
 `ordinary` means the default login with `CLAUDE_CONFIG_DIR` unset, exactly as for the pin.
 For example:
@@ -931,12 +929,13 @@ An account is skipped, with a `note:` line naming the reason, when:
 - its directory is missing or unreadable, it is signed out, or it reports no email;
 - its email repeats an earlier account's, so one login is never counted twice;
 - its quota reading names a different email, which would mean the read fell back to another login;
-- its runway is exhausted, its five-hour window is under `five-hour-floor`, or its weekly window is under `floor`;
+- its runway is exhausted, its five-hour window is under the fixed 15 percent guard, or its weekly window is under the fixed 10 percent floor;
+- its quota cannot be read, which is reported and never treated as usable;
 - it is the `pages` account and its weekly window is under `reserve`.
 
 The eligible accounts rank by quota-axi's `all_models` `spendPriority`, the same use-it-or-lose-it score dispatch profiles use, then by weekly percent left, then by file order.
-An account whose quota cannot be read stays eligible, ranked after every account with a reading, and the note says so.
-The launch refuses only when every account is skipped.
+The launch refuses when every account is skipped after a reading.
+When no signed-in account's quota can be read at all, the launch takes the ordinary default login exactly as without a pool, records no `account=`, and says so in a `note:`; it never falls to the `pages` account on an unknown quota.
 
 A secondmate launch and a raw Claude launch command take the `pages` account when one is declared, with only the sign-in check, so a session that may publish pages always runs on the account that owns them.
 A raw Claude launch command whose leading assignments set `CLAUDE_CONFIG_DIR` or a credential the launch unsets refuses, as under a pin.
@@ -950,7 +949,7 @@ The override skips the quota gates but not the sign-in check; a signed-out or un
 The chosen account is applied exactly as a pin's: the launch names the root, or unsets `CLAUDE_CONFIG_DIR` for `ordinary`, and sheds the environment credentials Claude ranks above a stored login.
 The spawned line and the task record carry `account=` and `account_email=`.
 
-A relaunch stays on the task's recorded account while that account remains eligible, and otherwise chooses again; a running conversation never changes account.
+A relaunch stays on the task's recorded account while that account remains eligible, and otherwise chooses again; a Claude task with no recorded `account=` counts as on `ordinary`; a running conversation never changes account.
 A worker that should not publish claude.ai pages from a non-`pages` login is a brief-level instruction; the pool does not enforce it.
 
 ### New profile parity

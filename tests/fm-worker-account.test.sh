@@ -500,13 +500,36 @@ test_pool_skips_signed_out_duplicate_and_misread_members() {
     "a reading of another login should never be trusted"
   assert_contains "$out" "skipped $CASE/missing: not a readable, searchable directory" "a missing root should be skipped"
   assert_contains "$out" "account=$CASE/max1 account_email=n@example.com" "the one usable member should be chosen"
+  pass "a Claude pool skips signed-out, duplicate, misread, and missing members with a note and launches on the rest"
+}
+
+test_pool_never_trusts_an_unreadable_quota() {
+  local out rc id=pool-unread
+  new_case pool-unread claude
+  pool_member "$HOME_DIR/user-home/.claude" s@example.com
+  pool_member "$CASE/max1" n@example.com 50 90 0.4
+  printf 'account=ordinary\naccount=%s\npages=ordinary\n' "$CASE/max1" > "$HOME_DIR/config/claude-accounts"
+  out=$(spawn_ship "$id-one"); rc=$?
+  expect_code 0 "$rc" "a pool with one readable member should launch on it: $out"
+  assert_contains "$out" "skipped ordinary (s@example.com): not eligible, quota read failed" \
+    "an unreadable member should be skipped with a clear report"
+  assert_contains "$out" "account=$CASE/max1 account_email=n@example.com" "the readable member should be chosen"
 
   rm "$CASE/max1/quota.json"
-  out=$(spawn_ship "$id-unread"); rc=$?
-  expect_code 0 "$rc" "a signed-in member without a quota reading should stay eligible: $out"
-  assert_contains "$out" "chose $CASE/max1 (n@example.com): no member has a usable quota reading" \
-    "an unreadable quota should be disclosed, not refused"
-  pass "a Claude pool skips signed-out, duplicate, misread, and missing members with a note and launches on the rest"
+  out=$(spawn_ship "$id-none"); rc=$?
+  expect_code 0 "$rc" "a pool with no readable member should fall back to the default launch: $out"
+  assert_contains "$out" "could not read any member's quota; launching on the ordinary default login exactly as without a pool" \
+    "the fallback should be reported"
+  assert_not_contains "$out" "chose" "no member should be chosen on an unknown quota"
+  assert_not_contains "$out" "account=" "the fallback launch should record no account, as without a pool"
+  assert_no_grep "^account" "$HOME_DIR/state/$id-none.meta" "the fallback task record should carry no account"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/ambient-claude" "$CASE/claude-worker" "the fallback launch should use the ambient login, not a pool member"
+
+  out=$(spawn_ship "$id-override" --account "$CASE/max1"); rc=$?
+  expect_code 0 "$rc" "--account should still override an unreadable quota: $out"
+  assert_contains "$out" "account=$CASE/max1 account_email=n@example.com" "the override should name the requested account"
+  pass "a Claude pool skips unreadable members, falls back to the default login when none can be read, and still honours --account"
 }
 
 test_pool_override_and_fixed_launches() {
@@ -562,7 +585,7 @@ test_malformed_pools_refuse_and_other_runners_ignore_the_pool() {
   pool_member "$CASE/max1" n@example.com 50 90 1.0
   for body in 'relative/root' "account=$CASE/max1"$'\r' 'pages=ordinary' "account=relative" \
     "account=$CASE/max1"$'\n'"account=$CASE/max1" "account=ordinary"$'\n'"pages=$CASE/max1" \
-    "account=ordinary"$'\n'"reserve=101" "account=ordinary"$'\n'"floor=10"$'\n'"floor=5" "account=ordinary"$'\n'"five-hour-floor=x"; do
+    "account=ordinary"$'\n'"reserve=101" "account=ordinary"$'\n'"floor=10" "account=ordinary"$'\n'"five-hour-floor=15" "account=ordinary"$'\n'"reserve=x"; do
     n=$((n + 1))
     printf '%s' "$body" > "$HOME_DIR/config/claude-accounts"
     out=$(spawn_ship "$id-$n"); rc=$?
@@ -594,6 +617,7 @@ test_local_secondmate_reads_the_launching_home_pin
 test_pool_rotates_to_the_member_with_the_best_spend_priority
 test_pool_keeps_the_guards_floor_and_pages_reserve
 test_pool_skips_signed_out_duplicate_and_misread_members
+test_pool_never_trusts_an_unreadable_quota
 test_pool_override_and_fixed_launches
 test_malformed_pools_refuse_and_other_runners_ignore_the_pool
 

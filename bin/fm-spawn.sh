@@ -1791,7 +1791,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ;;
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
-  RELAUNCH_PRIOR_ACCOUNT=$(fm_meta_get "$RELAUNCH_META" account)
+  RELAUNCH_PRIOR_ACCOUNT=$(fm_worker_account_prior "$RELAUNCH_PRIOR_HARNESS" "$(fm_meta_get "$RELAUNCH_META" account)")
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that

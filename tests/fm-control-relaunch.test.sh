@@ -846,6 +846,24 @@ test_claude_pool_relaunch_stays_on_its_account_while_eligible() {
   pass "fm-control relaunch: a pooled task stays on its recorded account while eligible, moves when it is not, and honours --account"
 }
 
+test_claude_pool_relaunch_of_an_unrecorded_task_stays_on_the_ordinary_login() {
+  local dir out rc id=rl-pool-legacy
+  dir=$(new_case pool-legacy "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_pool_stub "$dir"
+  mkdir -p "$dir/home/config"
+  pool_member "$dir/user-home/.claude" s@example.com 60 0.5
+  pool_member "$dir/max1" n@example.com 50 3.0
+  printf 'account=ordinary\naccount=%s\n' "$dir/max1" > "$dir/home/config/claude-accounts"
+  ! grep -q '^account=' "$dir/home/state/$id.meta" || fail "the fixture task must predate the pool and record no account"
+  out=$(run_control "$dir" "$id" relaunch --note "launched before the pool existed"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task with no recorded account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = ordinary ] \
+    || fail "a Claude task with no recorded account should stay on the default login even when another ranks higher"
+  [ "$(meta_field "$dir" "$id" account_email)" = s@example.com ] || fail "the relaunched record should carry the default login"
+  pass "fm-control relaunch: a Claude task with no recorded account stays on the ordinary login"
+}
+
 test_signed_out_worker_account_pin_refuses_before_stop() {
   local dir out rc id=rl-acct-out
   dir=$(new_case acct-out "$id")
@@ -2477,6 +2495,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_claude_pool_relaunch_stays_on_its_account_while_eligible
+test_claude_pool_relaunch_of_an_unrecorded_task_stays_on_the_ordinary_login
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

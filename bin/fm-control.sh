@@ -867,7 +867,7 @@ resolve_relaunch_profile() {
   local account_model=$TARGET_MODEL account_err
   [ "$account_model" != default ] || account_model=
   if ! account_err=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" "" "$KIND" "$NEW_ACCOUNT" "$(fm_meta_get "$META" account)" 2>&1 >/dev/null); then
+    "$account_model" "$TARGET_HARNESS" "" "$KIND" "$NEW_ACCOUNT" "$(fm_worker_account_prior "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)")" 2>&1 >/dev/null); then
     printf '%s\n' "$account_err" | grep -v '^note: ' >&2
     return 1
   fi

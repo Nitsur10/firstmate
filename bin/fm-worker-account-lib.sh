@@ -320,8 +320,6 @@ fm_worker_account_select() {
 #   account=<ordinary|/absolute/root>   one per pooled login, at least one
 #   pages=<one of the accounts>         optional: the account that owns pages
 #   reserve=<0-100>                     weekly percent kept on pages (default 20)
-#   floor=<0-100>                       weekly percent a launch needs (default 10)
-#   five-hour-floor=<0-100>             five-hour percent a launch needs (default 15)
 # Each member is probed in the same cleared environment as the pin check:
 # `claude auth status --json` names its signed-in email, and one bounded
 # `quota-axi --provider claude --no-credential-refresh --max-age 5m --full
@@ -330,9 +328,11 @@ fm_worker_account_select() {
 # have). A member is skipped, with a note, when its root is unusable, it is
 # signed out or names no email, its email repeats an earlier member's, its
 # quota reading names a different account, or a reading shows it exhausted,
-# under five-hour-floor or floor, or (the pages account) under reserve. An
-# unreadable quota is disclosed uncertainty and keeps a signed-in member
-# eligible behind every member with a reading. Eligible members rank by
+# under the five-hour guard (15 percent) or the weekly floor (10 percent), or
+# (the pages account) under reserve. A member whose quota cannot be read is not
+# eligible either, and is reported; when no signed-in member can be read at all
+# the launch falls back to the ordinary default login exactly as without a
+# pool, never to the pages account on a guess. Eligible members rank by
 # quota-axi's all_models spendPriority, then weekly percent left, then file
 # order. A relaunch stays on its recorded account while that account remains
 # eligible. A secondmate or raw Claude launch takes the pages account when one
@@ -341,11 +341,13 @@ fm_worker_account_select() {
 # the sign-in check. Only when every member is skipped does the launch refuse.
 
 FM_WORKER_ACCOUNT_QUOTA_SECONDS=${FM_WORKER_ACCOUNT_QUOTA_SECONDS:-20}
+FM_WORKER_ACCOUNT_POOL_FLOOR=10
+FM_WORKER_ACCOUNT_POOL_FIVE_HOUR_GUARD=15
 
 # fm_worker_account_pool_read <file>
 # Prints the pool as "key<TAB>value" lines: one `account` line per member in
-# file order, then `pages` (empty when undeclared), `reserve`, `floor`, and
-# `five-hour-floor` with defaults applied. Returns 3 when the file does not
+# file order, then `pages` (empty when undeclared) and `reserve` with its
+# default applied. Returns 3 when the file does not
 # exist, 4 when it cannot be inspected, 5 when it is not a readable regular
 # file, and 6 when it is malformed; 4 and 6 print one error.
 fm_worker_account_pool_read() {
@@ -362,14 +364,14 @@ fm_worker_account_pool_read() {
     sub bad { print STDERR "error: config/claude-accounts $_[0]: $f\n"; exit 6 }
     bad("must not contain control characters other than newlines") if $body =~ /[\x00-\x09\x0b-\x1f\x7f]/;
     my (@acct, %seen, %one);
-    my %pct = ("reserve" => 20, "floor" => 10, "five-hour-floor" => 15);
+    my $reserve = 20;
     my $pages = "";
     my $n = 0;
     for my $line (split /\n/, $body) {
       $n++;
       next if $line =~ /\A\s*(?:#.*)?\z/;
-      my ($k, $v) = $line =~ /\A(account|pages|reserve|floor|five-hour-floor)=(.*)\z/
-        or bad("line $n must be account=, pages=, reserve=, floor=, or five-hour-floor=");
+      my ($k, $v) = $line =~ /\A(account|pages|reserve)=(.*)\z/
+        or bad("line $n must be account=, pages=, or reserve=");
       if ($k eq "account" or $k eq "pages") {
         $v =~ m{\A(?:ordinary|/.*)\z} or bad("line $n must name ordinary or one absolute path");
       }
@@ -381,13 +383,13 @@ fm_worker_account_pool_read() {
       bad("line $n repeats $k=") if $one{$k}++;
       if ($k eq "pages") { $pages = $v; next }
       ($v =~ /\A(?:100|[1-9]?[0-9])\z/) or bad("line $n needs $k= a whole percent from 0 to 100");
-      $pct{$k} = $v;
+      $reserve = $v;
     }
     bad("must name at least one account=") unless @acct;
     bad("pages=$pages must also be listed as an account=") if $pages ne "" && !$seen{$pages};
     print "account\t$_\n" for @acct;
     print "pages\t$pages\n";
-    print "$_\t$pct{$_}\n" for ("reserve", "floor", "five-hour-floor");
+    print "reserve\t$reserve\n";
   ' -- "$1"
 }
 
@@ -423,13 +425,13 @@ fm_worker_account_claude_email() {
   printf '%s\n' "$email"
 }
 
-# fm_worker_account_claude_quota <declared> <email> <floor> <five-hour-floor> <reserve>
+# fm_worker_account_claude_quota <declared> <email> <reserve>
 # Prints one verdict line for the account's live quota: "ok<TAB>spendPriority
 # <TAB>weekly<TAB>summary" (spendPriority and weekly may be empty), "unknown
 # <TAB>reason", or "skip<TAB>reason". <reserve> is -1 for every account but
 # the pages account.
 fm_worker_account_claude_quota() {
-  local declared=$1 email=$2 floor=$3 five=$4 reserve=$5 out rc
+  local declared=$1 email=$2 reserve=$3 out rc
   fm_worker_account_clean_env CLAUDE_CONFIG_DIR "$(fm_worker_account_root "$declared")"
   out=$(fm_run_timed "$FM_WORKER_ACCOUNT_QUOTA_SECONDS" "${FM_WORKER_ACCOUNT_ENV[@]}" \
     quota-axi --provider claude --no-credential-refresh --max-age 5m --full --json 2>/dev/null </dev/null)
@@ -442,8 +444,8 @@ fm_worker_account_claude_quota() {
     fi
     return 0
   fi
-  printf '%s\n' "$out" | jq -r --arg email "$email" --argjson floor "$floor" \
-    --argjson five "$five" --argjson reserve "$reserve" '
+  printf '%s\n' "$out" | jq -r --arg email "$email" --argjson floor "$FM_WORKER_ACCOUNT_POOL_FLOOR" \
+    --argjson five "$FM_WORKER_ACCOUNT_POOL_FIVE_HOUR_GUARD" --argjson reserve "$reserve" '
     ([.providers[]? | select(.provider == "claude")] | first) as $p |
     (($p.account.email // "") | ascii_downcase) as $qe |
     if $p == null then "unknown\tquota reading has no claude row"
@@ -469,9 +471,10 @@ fm_worker_account_claude_quota() {
 # printing nothing, when the home has no pool and no override was asked for.
 fm_worker_account_pool_select() {
   local config=$1 executable=$2 raw=$3 kind=$4 asked=$5 prior=$6 override
-  local file="$config/claude-accounts" pool rc key value reserve floor five pages=
+  local file="$config/claude-accounts" pool rc key value reserve pages=
   local i member email verdict status rest reason summary best priority weekly chosen='' chosen_email=
-  local -a members=() emails=() skipped=() ranked=() unknown=()
+  local -a members=() emails=() skipped=() ranked=()
+  local unread=0 refused=0
   pool=$(fm_worker_account_pool_read "$file")
   rc=$?
   case "$rc" in
@@ -494,8 +497,6 @@ fm_worker_account_pool_select() {
     account) members+=("$value") ;;
     pages) pages=$value ;;
     reserve) reserve=$value ;;
-    floor) floor=$value ;;
-    five-hour-floor) five=$value ;;
     esac
   done <<<"$pool"
   fm_worker_account_raw_guard "$raw" claude-accounts || return 1
@@ -540,9 +541,9 @@ fm_worker_account_pool_select() {
       if email=$(fm_worker_account_claude_email "$executable" "$member"); then
         value=-1
         [ "$member" != "$pages" ] || value=$reserve
-        verdict=$(fm_worker_account_claude_quota "$member" "$email" "$floor" "$five" "$value")
+        verdict=$(fm_worker_account_claude_quota "$member" "$email" "$value")
         status=${verdict%%$'\t'*}
-        if [ "$status" != skip ]; then
+        if [ "$status" = ok ]; then
           echo "note: Claude account pool kept $member ($email) for this relaunch: ${verdict##*$'\t'}" >&2
           printf '%s\t%s\t\t%s\n' "$member" "$(fm_worker_account_root "$member")" "$email"
           return 0
@@ -570,7 +571,7 @@ fm_worker_account_pool_select() {
     emails+=("$member"$'\t'"$email")
     value=-1
     [ "$member" != "$pages" ] || value=$reserve
-    verdict=$(fm_worker_account_claude_quota "$member" "$email" "$floor" "$five" "$value")
+    verdict=$(fm_worker_account_claude_quota "$member" "$email" "$value")
     status=${verdict%%$'\t'*}
     rest=${verdict#*$'\t'}
     case "$status" in
@@ -583,8 +584,14 @@ fm_worker_account_pool_select() {
       [ -z "$priority" ] || summary="$summary, spendPriority $priority"
       ranked+=("${priority:--1e308}"$'\t'"${weekly:--1}"$'\t'"$i"$'\t'"$member"$'\t'"$email"$'\t'"$summary")
       ;;
-    unknown) unknown+=("$member"$'\t'"$email"$'\t'"$rest") ;;
-    *) skipped+=("$member ($email): $rest") ;;
+    unknown)
+      unread=$((unread + 1))
+      skipped+=("$member ($email): not eligible, $rest")
+      ;;
+    *)
+      refused=$((refused + 1))
+      skipped+=("$member ($email): $rest")
+      ;;
     esac
   done
   for value in ${skipped[@]+"${skipped[@]}"}; do
@@ -595,16 +602,27 @@ fm_worker_account_pool_select() {
     chosen=$(printf '%s' "$best" | cut -f4)
     chosen_email=$(printf '%s' "$best" | cut -f5)
     summary=$(printf '%s' "$best" | cut -f6)
-  elif [ "${#unknown[@]}" -gt 0 ]; then
-    chosen=$(printf '%s' "${unknown[0]}" | cut -f1)
-    chosen_email=$(printf '%s' "${unknown[0]}" | cut -f2)
-    summary="no member has a usable quota reading; $(printf '%s' "${unknown[0]}" | cut -f3)"
+  elif [ "$unread" -gt 0 ] && [ "$refused" -eq 0 ]; then
+    echo "note: Claude account pool could not read any member's quota; launching on the ordinary default login exactly as without a pool" >&2
+    return 0
   else
     echo "error: config/claude-accounts has no account a launch may use; every member was skipped (see the notes above): sign one in, wait for a reset, or name one with --account" >&2
     return 1
   fi
   echo "note: Claude account pool chose $chosen ($chosen_email): $summary" >&2
   printf '%s\t%s\t\t%s\n' "$chosen" "$(fm_worker_account_root "$chosen")" "$chosen_email"
+}
+
+# fm_worker_account_prior <prior-harness> <recorded-account>
+# Prints the account a relaunched task is treated as already on: the recorded
+# account=, or `ordinary` for a Claude task whose record predates the pool and
+# carries none, so its relaunch stays on the login it started on.
+fm_worker_account_prior() {
+  if [ -n "$2" ] || [ "$1" != claude ]; then
+    printf '%s\n' "$2"
+  else
+    printf 'ordinary\n'
+  fi
 }
 
 # fm_worker_account_claude_shed
