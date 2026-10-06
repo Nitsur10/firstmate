@@ -164,35 +164,57 @@ test_floor_prevents_restart_loop() {
   pass "context restart: a conversation that starts over the threshold restarts only after growing half a threshold, so restarts cannot loop"
 }
 
+# Two stops, a small one that would set a low floor and then one far past the
+# restart point, must both stay silent and leave no restart state behind, and
+# restart must refuse; otherwise a broken scope check could hide behind the
+# floor rule. <prefix> runs before each hook command inside the fake primary.
+expect_out_of_scope() {  # <dir> <home-under-test> <prefix> <label>
+  local dir=$1 home=$2 prefix=$3 label=$4 out status f
+  write_transcript "$dir/small.jsonl" 60000
+  write_transcript "$dir/big.jsonl" 300000
+  stop_payload "$dir/p-small.json" S1 "$dir/small.jsonl"
+  stop_payload "$dir/p-big.json" S1 "$dir/big.jsonl"
+  out=$(as_primary "$home" S1 "$prefix bin/fm-context-restart.sh stop-hook" "$dir/p-small.json" 2>&1)
+  out="$out$(as_primary "$home" S1 "$prefix bin/fm-context-restart.sh stop-hook" "$dir/p-big.json" 2>&1)"
+  assert_equals "" "$out" "$label: the stop-hook stays silent"
+  for f in floor prompted request; do
+    [ ! -e "$home/state/context-restart/$f" ] || fail "$label: the stop-hook wrote restart state ($f)"
+  done
+  out=$(as_primary "$home" S1 "$prefix bin/fm-context-restart.sh restart --stowed" 2>&1); status=$?
+  expect_code 1 "$status" "$label: restart"
+  assert_contains "$out" "context restart refused" "$label: restart refuses"
+}
+
 test_out_of_scope_sessions_stay_silent() {
-  local dir sm wt base out other
+  local dir sm wt base other out
   dir=$(make_primary_dir "$TMP_ROOT/scope")
   printf '200k\n' > "$dir/config/context-restart"
-  write_transcript "$dir/big.jsonl" 300000
-  stop_payload "$dir/p.json" S1 "$dir/big.jsonl"
+  expect_out_of_scope "$dir" "$dir" 'CLAUDE_CODE_ENTRYPOINT=sdk-cli' "an SDK session such as the supervision host"
+  expect_out_of_scope "$dir" "$dir" 'env -u CLAUDE_PID' "a host with no proven Claude identity"
 
-  out=$(as_primary "$dir" S1 'CLAUDE_CODE_ENTRYPOINT=sdk-cli bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_equals "" "$out" "an SDK session such as the supervision host is out of scope"
-
-  out=$(as_primary "$dir" S1 'unset CLAUDE_PID; bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_equals "" "$out" "a host with no proven Claude identity is out of scope"
+  # A positive control on the same home proves the two payloads do trigger.
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p-small.json" 2>&1)
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p-big.json" 2>&1)
+  assert_contains "$out" '"block"' "the same payloads trigger for the in-scope primary"
+  rm -rf "$dir/state/context-restart"
 
   "$FAKE_CLAUDE" -c 'sleep 60; :' >/dev/null 2>&1 &
   other=$!
   out=$(env "${SCRUB[@]}" FM_TEST_DIR="$dir" FM_TEST_OTHER="$other" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$FM_TEST_OTHER" > "$FM_TEST_DIR/state/.lock"
     export CLAUDE_PID=$$ CLAUDE_CODE_SESSION_ID=S1
-    cd "$FM_TEST_DIR" && bin/fm-context-restart.sh stop-hook
-    :' < "$dir/p.json" 2>&1)
+    cd "$FM_TEST_DIR" && bin/fm-context-restart.sh stop-hook < p-small.json
+    bin/fm-context-restart.sh stop-hook < p-big.json
+    :' 2>&1)
   kill "$other" 2>/dev/null || true
   wait "$other" 2>/dev/null || true
-  assert_equals "" "$out" "a session that does not own the lock is out of scope"
+  assert_equals "" "$out" "a session that does not own the lock stays silent"
+  [ ! -e "$dir/state/context-restart/floor" ] || fail "a session that does not own the lock wrote restart state"
 
   sm=$(make_primary_dir "$TMP_ROOT/scope-sm")
   printf 'sm-ctx\n' > "$sm/.fm-secondmate-home"
   printf '200k\n' > "$sm/config/context-restart"
-  out=$(as_primary "$sm" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_equals "" "$out" "a second mate home never restarts automatically"
+  expect_out_of_scope "$dir" "$sm" '' "a second mate home"
 
   base=$(make_primary_dir "$TMP_ROOT/scope-base")
   wt="$TMP_ROOT/scope-wt"
@@ -201,9 +223,8 @@ test_out_of_scope_sessions_stay_silent() {
   : > "$wt/AGENTS.md"
   cp -R "$ROOT/bin" "$wt/bin"
   printf '200k\n' > "$wt/config/context-restart"
-  out=$(as_primary "$wt" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_equals "" "$out" "a linked task worktree is out of scope"
-  pass "context restart: SDK sessions, non-Claude hosts, non-owners, second mate homes, and task worktrees stay silent"
+  expect_out_of_scope "$dir" "$wt" '' "a linked task worktree"
+  pass "context restart: SDK sessions, non-Claude hosts, non-owners, second mate homes, and task worktrees stay silent, write nothing, and cannot restart"
 }
 
 test_restart_refusals() {
@@ -266,6 +287,52 @@ test_session_hook_records_clear() {
   pass "context restart: session-hook records only a clear of the requesting lock owner"
 }
 
+# A turn that runs after the restarting turn ended, before the clear, may hold
+# work the stow pass never saw: the request is cancelled and offered again.
+test_later_turn_cancels_pending_restart() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/stale")
+  printf '200k\n' > "$dir/config/context-restart"
+  mkdir -p "$dir/state/context-restart"
+  write_transcript "$dir/t.jsonl" 250000
+  stop_payload "$dir/p.json" S1 "$dir/t.jsonl"
+  printf 'S1\n60000\n' > "$dir/state/context-restart/floor"
+  printf 'S1\n250000\n' > "$dir/state/context-restart/prompted"
+  printf 'session=S1\npid=1\nbackend=tmux\ntarget=%%1\nthreshold=200000\ncontext=250000\nrequested_at=%s\n' "$(date +%s)" \
+    > "$dir/state/context-restart/request"
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_equals "" "$out" "the turn that ran restart ends quietly"
+  assert_grep "$dir/t.jsonl" "$dir/state/context-restart/turn-end" "its end is recorded for the injector"
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_equals "" "$out" "a repeated stop with no new step changes nothing"
+  [ ! -e "$dir/state/context-restart/result" ] || fail "a stop with no new step cancelled the restart"
+  printf '{"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"m9","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":260000,"output_tokens":1}}}\n' >> "$dir/t.jsonl"
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_grep 'cancelled ' "$dir/state/context-restart/result" "a later turn cancels the pending restart"
+  assert_contains "$out" "restart --stowed" "the restart is offered again, stow first"
+  pass "context restart: a turn that runs before the clear cancels the pending restart and offers it again"
+}
+
+# A failure after the clear can only reach the cleared conversation.
+test_post_clear_failure_reaches_successor() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/postclear")
+  printf '200k\n' > "$dir/config/context-restart"
+  mkdir -p "$dir/state/context-restart"
+  write_transcript "$dir/t.jsonl" 70000
+  stop_payload "$dir/p.json" S2 "$dir/t.jsonl"
+  printf 'session=S1\npid=1\nbackend=tmux\ntarget=%%1\nthreshold=200000\ncontext=250000\nrequested_at=%s\n' "$(date +%s)" \
+    > "$dir/state/context-restart/request"
+  printf '%s S2\n' "$(date +%s)" > "$dir/state/context-restart/cleared"
+  printf 'failed the restart notice was not confirmed submitted (verdict=pending)\n' > "$dir/state/context-restart/result"
+  out=$(as_primary "$dir" S2 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_contains "$out" "restart notice did not arrive" "the cleared conversation hears about the lost notice"
+  assert_contains "$out" "Do not type /clear again" "it is not told to clear again"
+  out=$(as_primary "$dir" S2 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_equals "" "$out" "the post-clear failure is reported once"
+  pass "context restart: a failure after the clear is reported once to the cleared conversation"
+}
+
 # End to end through the real injector: a private tmux pane runs a composer
 # that logs submitted lines; the fake primary requests the restart, the
 # injector types /clear, the test plays Claude's SessionStart hook when the
@@ -275,6 +342,12 @@ test_injector_end_to_end_tmux() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; return 0; }
   dir=$(make_primary_dir "$TMP_ROOT/e2e")
   printf '200k\n' > "$dir/config/context-restart"
+  write_transcript "$dir/t.jsonl" 250000
+  # An away posture and a queued wake must come through the restart unchanged.
+  printf 'mode=away\n' > "$dir/state/.afk"
+  printf '1\tsignal: fixture wake\n' > "$dir/state/.wake-queue"
+  cp "$dir/state/.afk" "$dir/afk.before"
+  cp "$dir/state/.wake-queue" "$dir/queue.before"
   real_tmux=$(command -v tmux)
   socket="fm-ctx-restart-$$"
   log="$dir/submitted.log"
@@ -312,6 +385,7 @@ LOOP
       export CLAUDE_PID=$$ CLAUDE_CODE_SESSION_ID=S1 CLAUDE_CODE_ENTRYPOINT=cli
       cd "$FM_TEST_DIR" || exit 1
       bin/fm-context-restart.sh restart --stowed > restart.out 2>&1 || exit 1
+      printf "%s\n" "{\"session_id\":\"S1\",\"transcript_path\":\"$FM_TEST_DIR/t.jsonl\"}" | bin/fm-context-restart.sh stop-hook
       for i in $(seq 1 60); do grep -qx "/clear" "$FM_TEST_LOG" && break; sleep 0.5; done
       printf "%s\n" "{\"session_id\":\"S2\",\"source\":\"clear\"}" | CLAUDE_CODE_SESSION_ID=S2 bin/fm-context-restart.sh session-hook
       for i in $(seq 1 60); do [ -e state/context-restart/result ] && break; sleep 0.5; done
@@ -326,7 +400,9 @@ LOOP
   [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] || fail "expected exactly two submissions, got: $(cat "$log")"
   i=$(sed -n 2p "$log" | sed "s/.*read '\\([^']*\\)'.*/\\1/")
   assert_grep 'FIRSTMATE_OP: v1 session-start: Context restart:' "$i" "the doorbell names a session-start operational record"
-  pass "context restart: end to end in tmux the injector types /clear, waits for the cleared session, then submits one restart notice"
+  cmp -s "$dir/afk.before" "$dir/state/.afk" || fail "the restart changed the away-mode record"
+  cmp -s "$dir/queue.before" "$dir/state/.wake-queue" || fail "the restart changed the wake queue"
+  pass "context restart: end to end in tmux the injector types /clear, waits for the cleared session, then submits one restart notice, leaving away mode and the wake queue untouched"
 }
 
 test_off_without_config
@@ -337,4 +413,6 @@ test_out_of_scope_sessions_stay_silent
 test_restart_refusals
 test_failure_reported_once
 test_session_hook_records_clear
+test_later_turn_cancels_pending_restart
+test_post_clear_failure_reaches_successor
 test_injector_end_to_end_tmux

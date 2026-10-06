@@ -62,10 +62,18 @@ test_report_attributes_every_rule() {
 
   now=$(date +%s)
   # The pool slot served taska first, then taskb from 2 hours ago.
-  printf '%s\ttaska\tship\tclaude\t%s\t%s\t\n' $((now - 20000)) "$wt" "$wt" > "$main/state/usage-attribution.tsv"
-  printf '%s\ttaskb\tship\tclaude\t%s\t%s\t\n' $((now - 7200)) "$wt" "$wt" >> "$main/state/usage-attribution.tsv"
+  {
+    printf '%s\ttaska\tship\tclaude\t%s\t%s\t\tearlier@example.invalid\n' $((now - 20000)) "$wt" "$wt"
+    printf '%s\ttaskb\tship\tclaude\t%s\t%s\t\towner@example.invalid\n' $((now - 7200)) "$wt" "$wt"
+    # A second mate launch names the mate home, which stays the mate own.
+    printf '%s\tsm1\tsecondmate\tclaude\t%s\t%s\t\towner@example.invalid\n' $((now - 30000)) "$sm" "$sm"
+    # A worktree that happens to sit under the main home root.
+    printf '%s\tinner\tship\tclaude\t%s\t%s\t\towner@example.invalid\n' $((now - 7200)) "$main/pool/1" "$main/pool/1"
+    # A slot reused 100 seconds after a step: that step stays with the earlier task.
+    printf '%s\tlate\tship\tclaude\t%s\t%s\t\towner@example.invalid\n' $((now - 2900)) "$h/pool/3" "$h/pool/3"
+    printf '%s\tearly\tship\tclaude\t%s\t%s\t\towner@example.invalid\n' $((now - 9000)) "$h/pool/3" "$h/pool/3"
+  } > "$main/state/usage-attribution.tsv"
   printf '%s\tmatetask\tship\tclaude\t%s\t%s\t\n' $((now - 9000)) "$h/pool/2/other" "$h/pool/2/other" > "$sm/state/usage-attribution.tsv"
-
   acct="$h/fakehome/.claude/projects"
   step "$acct/main/s1.jsonl" m1 3600 "$main" "main" cli claude-opus-5-5 1000000 0
   step "$acct/main/s1.jsonl" m1 3600 "$main" "main" cli claude-opus-5-5 1000000 0
@@ -77,6 +85,8 @@ test_report_attributes_every_rule() {
   step "$acct/sm/s6.jsonl" m6 3000 "$h/pool/2/other" "fm/matetask" cli claude-haiku-4-5-20251001 1000000 0
   step "$acct/nm/s7.jsonl" m7 3000 "$nmwt" "HEAD" sdk-cli claude-sonnet-5-5 1000000 0
   step "$acct/nm/s8.jsonl" m8 3000 "$h/nm/.no-mistakes/worktrees/zzz/RUN2" "fm/matetask" sdk-cli claude-sonnet-5-5 1000000 0
+  step "$acct/inner/s12.jsonl" m12 3000 "$main/pool/1" "fm/inner" cli claude-opus-5-5 1000000 0
+  step "$acct/p3/s13.jsonl" m13 3000 "$h/pool/3" "fm/early" cli claude-opus-5-5 1000000 0
   step "$acct/x/s10.jsonl" m10 3000 "$h/elsewhere" "" cli mystery-model 5 7
   step "$acct/x/s11.jsonl" m11 $((9 * 86400)) "$main" "main" cli claude-opus-5-5 1000000 0
 
@@ -91,13 +101,34 @@ test_report_attributes_every_rule() {
   assert_equals $'1\t0.20' "$(row main 'proj (PR checks)')" "a detached PR check maps through the clone's pipeline remote"
   assert_equals $'1\t0.20' "$(row sm1 'matetask (PR checks)')" "a PR check on a task branch belongs to that task"
   assert_equals $'1\t0.00' "$(row '(other)' "$h/elsewhere")" "an unknown working directory is reported as other, unpriced"
+  assert_equals $'1\t0.20' "$(row main inner)" "a task worktree under a home root belongs to its task, not the home"
+  assert_equals $'1\t0.20' "$(row main early)" "a step 100 seconds before a slot is reused stays with the earlier task"
+  assert_equals "" "$(row main late)" "a launch never claims steps from before it"
+  assert_equals "" "$(row main sm1)" "a second mate launch record does not take the mate home's own sessions"
   assert_contains "$tsv" $'\towner@example.invalid\t' "rows carry the login folder's account"
 
   out=$(env "${SCRUB[@]}" HOME="$h/fakehome" FM_HOME="$main" "$SCRIPT" --since 1d) || fail "human report failed"
-  assert_contains "$out" "(owner@example.invalid)" "the human report names the account"
+  assert_contains "$out" "(signed in now as owner@example.invalid)" "the human report names the account signed in now"
+  assert_contains "$out" "also recorded this folder signed in as earlier@example.invalid" "a different account recorded at launch is called out"
   assert_contains "$out" "Not counted: second mate rm1 runs on mini" "a remote second mate is named as not counted"
   assert_contains "$out" "Unpriced model (tokens counted, no cost): mystery-model" "unknown models are flagged"
   pass "usage by home: report attributes home roots, supervision hosts, reused slots, second mates, PR checks, and other work, counting each step once"
+}
+
+test_report_is_bounded() {
+  local h fakebin out status start
+  h="$TMP_ROOT/bound"
+  mkdir -p "$h/fakehome/.claude/projects/p" "$h/main/state"
+  step "$h/fakehome/.claude/projects/p/s.jsonl" m1 60 "$h/main" main cli claude-opus-5-5 1 1
+  fakebin=$(fm_fakebin "$h/fakebin")
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$fakebin/jq"
+  chmod +x "$fakebin/jq"
+  start=$(date +%s)
+  out=$(env "${SCRUB[@]}" HOME="$h/fakehome" FM_HOME="$h/main" FM_USAGE_TIMEOUT=2 PATH="$fakebin:$PATH" "$SCRIPT" --since 1d 2>&1); status=$?
+  expect_code 1 "$status" "a report past its bound"
+  assert_contains "$out" "took longer than 2s" "the bound is named"
+  [ $(( $(date +%s) - start )) -lt 15 ] || fail "the report outlived its bound"
+  pass "usage by home: one hard bound covers the whole report"
 }
 
 test_report_rejects_bad_window() {
@@ -110,4 +141,5 @@ test_report_rejects_bad_window() {
 
 test_record_appends_attribution
 test_report_attributes_every_rule
+test_report_is_bounded
 test_report_rejects_bad_window

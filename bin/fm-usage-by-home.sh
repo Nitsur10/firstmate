@@ -6,12 +6,13 @@
 # folder a transcript sits under is the account that paid for it, and its
 # working directory says whose session it was. This script joins the two:
 #
-#   - A session whose working directory is a home's own root is that home's
-#     firstmate session; an SDK entrypoint there is its supervision host.
 #   - A session in a task's working directory is that task's, by the
 #     attribution records bin/fm-spawn.sh appends to each home's
 #     state/usage-attribution.tsv before every launch (`record` below). A
-#     worktree slot reused by a later task is told apart by launch time.
+#     worktree slot reused by a later task is told apart by launch time: a
+#     step belongs to the latest launch recorded at or before it.
+#   - Otherwise a session under a home's own root is that home's firstmate
+#     session; an SDK entrypoint there is its supervision host.
 #   - A no-mistakes validation session is credited to the task whose branch it
 #     checks when the branch's last path segment is a recorded task id, and
 #     otherwise to the home and project whose clone's `no-mistakes` remote
@@ -34,17 +35,23 @@
 #       --config-dir  a Claude login folder to scan, repeatable; default is
 #                     ${CLAUDE_CONFIG_DIR:-~/.claude}, ~/.claude, and every
 #                     folder a spawn record names
-#       --tsv         one row per account, home, and task, tab-separated:
-#                     config_dir account home task steps input cache_write
+#       --tsv         one row per login folder, home, and task, tab-separated:
+#                     config_dir account_now home task steps input cache_write
 #                     cache_read output usd
 #   fm-usage-by-home.sh record <task> <kind> <harness> <cwd> [<claude-config-dir>]
 #       Append one attribution record to state/usage-attribution.tsv (called
 #       by bin/fm-spawn.sh). Record format, tab-separated:
-#       epoch task kind harness cwd physical-cwd claude-config-dir
+#       epoch task kind harness cwd physical-cwd claude-config-dir account
+#       where account is the Claude login folder's signed-in email at launch.
+#
+# Accounts: a login folder's account is read when the report runs, so rows are
+# grouped by folder and labelled with the account signed in now; when a launch
+# recorded a different account for that folder inside the window, the report
+# says so, because the folder's earlier transcripts may belong to it.
 #
 # Bounds: only transcript files modified inside the window are read, steps are
 # filtered by their own timestamps, each API message is counted once even when
-# a resumed or forked session repeats it, and the whole scan stops after
+# a resumed or forked session repeats it, and the whole report stops after
 # FM_USAGE_TIMEOUT seconds (default 120). It runs only when invoked; no hook,
 # watcher, or spawn waits on it.
 set -u
@@ -59,14 +66,27 @@ SCAN_TIMEOUT=${FM_USAGE_TIMEOUT:-120}
 case "$SCAN_TIMEOUT" in ''|*[!0-9]*|0) SCAN_TIMEOUT=120 ;; esac
 
 usage() {
-  sed -n '/^# Usage:/,/^# Bounds:/{/^# Bounds:/d;s/^# \{0,1\}//;p;}' "$0"
+  sed -n '/^# Usage:/,/^# Accounts:/{/^# Accounts:/d;s/^# \{0,1\}//;p;}' "$0"
 }
 
 die() { echo "fm-usage-by-home: $1" >&2; exit "${2:-1}"; }
 
 # --- record -----------------------------------------------------------------
+# The account a login folder is signed in to now, or "unknown". The default
+# folder keeps its account record beside it in ~/.claude.json.
+account_of() {  # <config-dir>
+  local dir=$1 file email
+  if [ "$dir" = "$HOME/.claude" ]; then
+    file=$HOME/.claude.json
+  else
+    file=$dir/.claude.json
+  fi
+  email=$(jq -r '.oauthAccount.emailAddress // empty' "$file" 2>/dev/null)
+  printf '%s\n' "${email:-unknown}"
+}
+
 cmd_record() {
-  local task=${1:-} kind=${2:-} harness=${3:-} cwd=${4:-} config_dir=${5:-} phys field
+  local task=${1:-} kind=${2:-} harness=${3:-} cwd=${4:-} config_dir=${5:-} phys field account
   [ "$#" -ge 4 ] && [ "$#" -le 5 ] || die "usage: fm-usage-by-home.sh record <task> <kind> <harness> <cwd> [<claude-config-dir>]" 2
   for field in "$task" "$kind" "$harness" "$cwd" "$config_dir"; do
     case "$field" in *$'\t'*|*$'\n'*|*$'\r'*) die "record fields must not contain tabs or newlines" 2 ;; esac
@@ -74,7 +94,9 @@ cmd_record() {
   [ -n "$task" ] && [ -n "$cwd" ] || die "record needs a task and a working directory" 2
   phys=$(cd "$cwd" 2>/dev/null && pwd -P) || phys=$cwd
   [ -d "$STATE" ] || die "state directory $STATE does not exist"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$task" "$kind" "$harness" "$cwd" "$phys" "$config_dir" \
+  account=
+  [ "$harness" != claude ] || account=$(account_of "${config_dir:-$HOME/.claude}")
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$task" "$kind" "$harness" "$cwd" "$phys" "$config_dir" "$account" \
     >> "$STATE/$RECORDS_NAME" || die "cannot append to $STATE/$RECORDS_NAME"
 }
 
@@ -124,19 +146,6 @@ list_homes() {
   done < "$DATA/secondmates.md"
 }
 
-# The account a login folder is signed in to now, or "unknown". The default
-# folder keeps its account record beside it in ~/.claude.json.
-account_of() {  # <config-dir>
-  local dir=$1 file email
-  if [ "$dir" = "$HOME/.claude" ]; then
-    file=$HOME/.claude.json
-  else
-    file=$dir/.claude.json
-  fi
-  email=$(jq -r '.oauthAccount.emailAddress // empty' "$file" 2>/dev/null)
-  printf '%s\n' "${email:-unknown}"
-}
-
 # Emit one tab-separated line per assistant step in <config-dir> since the
 # window start: config_dir msg_id epoch cwd branch entrypoint model input
 # write_5m write_1h cache_read output.
@@ -165,7 +174,7 @@ scan_dir() {  # <config-dir> <since-epoch> <since-iso> <minutes>
 
 cmd_report() {
   local since_arg=7d tsv=0 since since_iso minutes now dir homes_file records_file steps_file
-  local label path host records count clone url
+  local label path host records count clone url acct
   local -a dirs=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -187,6 +196,8 @@ cmd_report() {
 
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-by-home.XXXXXX") || die "cannot create a temporary directory"
   trap 'rm -rf "$work"' EXIT
+  trap 'rm -rf "$work"; exit 143' TERM
+  trap 'rm -rf "$work"; exit 130' INT
   homes_file=$work/homes
   records_file=$work/records
   steps_file=$work/steps
@@ -230,25 +241,27 @@ cmd_report() {
   done
   [ "$count" -gt 0 ] || die "no Claude login folder found to scan"
 
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$SCRIPT_DIR/fm-timeout-lib.sh"
   : > "$steps_file"
   while IFS= read -r dir; do
-    fm_run_timed "$SCAN_TIMEOUT" bash -c "$(declare -f scan_dir); scan_dir \"\$@\"" _ \
-      "$dir" "$since" "$since_iso" "$minutes" >> "$steps_file"
-    if fm_timed_out "$?"; then
-      die "scanning $dir took longer than ${SCAN_TIMEOUT}s; narrow --since or raise FM_USAGE_TIMEOUT"
-    fi
+    scan_dir "$dir" "$since" "$since_iso" "$minutes" >> "$steps_file"
   done < "$work/dirs"
 
   : > "$work/accounts"
   while IFS= read -r dir; do
     printf '%s\t%s\n' "$dir" "$(account_of "$dir")" >> "$work/accounts"
   done < "$work/dirs"
+  # Accounts launches recorded for each folder inside the window.
+  : > "$work/launch-accounts"
+  # The account comes first because tab is IFS whitespace: an empty leading
+  # folder field (the default login folder) would otherwise shift the fields.
+  while IFS=$'\t' read -r acct dir; do
+    dir=$(cd "${dir:-$HOME/.claude}" 2>/dev/null && pwd -P) || continue
+    printf '%s\t%s\n' "$dir" "$acct" >> "$work/launch-accounts"
+  done < <(awk -F'\t' -v since="$since" '$5 == "claude" && $2 + 0 >= since && $9 != "" { print $9 "\t" $8 }' "$records_file" | sort -u)
 
   awk -F'\t' -v OFS='\t' \
     -v homes="$homes_file" -v records="$records_file" -v accounts="$work/accounts" \
-    -v pipelines="$work/pipelines" \
+    -v pipelines="$work/pipelines" -v launch_accounts="$work/launch-accounts" \
     -v home_dir="$HOME" -v tsv="$tsv" -v since_iso="$since_iso" -v since_arg="$since_arg" '
     function price(model, kind,    p, pa) {
       # US$ per million tokens: input, 5-minute cache write, 1-hour cache
@@ -282,11 +295,14 @@ cmd_report() {
       }
       while ((getline line < records) > 0) {
         split(line, r, "\t")
+        if (!(r[3] in task_home) || r[2] + 0 >= task_epoch[r[3]]) {
+          task_home[r[3]] = r[1]; task_epoch[r[3]] = r[2] + 0
+        }
+        # A second mate launch names the home of that mate, which the home
+        # roots below already attribute to the mate itself.
+        if (r[4] == "secondmate") continue
         nr++; rhome[nr] = r[1]; repoch[nr] = r[2] + 0; rtask[nr] = r[3]
         rcwd[nr] = r[6]; rphys[nr] = r[7]
-        if (!(r[3] in task_home) || repoch[nr] >= task_epoch[r[3]]) {
-          task_home[r[3]] = r[1]; task_epoch[r[3]] = repoch[nr]
-        }
       }
       while ((getline line < pipelines) > 0) {
         split(line, pl, "\t")
@@ -296,29 +312,44 @@ cmd_report() {
       while ((getline line < accounts) > 0) {
         split(line, ac, "\t"); account[ac[1]] = ac[2]
       }
+      while ((getline line < launch_accounts) > 0) {
+        split(line, la, "\t")
+        if (la[2] != account[la[1]] && index(other_accounts[la[1]], " " la[2] " ") == 0)
+          other_accounts[la[1]] = other_accounts[la[1]] " " la[2] " "
+      }
     }
     {
       dir = $1; id = $2; t = $3 + 0; cwd = $4; branch = $5; entry = $6; model = $7
       if (id != "" && (id in seen)) next
       if (id != "") seen[id] = 1
       home = ""; task = ""
-      best = 0
-      for (i = 1; i <= nh; i++) {
-        if (hhost[i] == "" && under(cwd, hpath[i]) && length(hpath[i]) > best) {
-          best = length(hpath[i]); home = hlabel[i]
-          task = (entry ~ /^sdk/) ? "(supervision host)" : "(firstmate)"
-        }
-      }
-      if (home == "") {
-        bestlen = 0; bestepoch = -1
+      # Records whose working directory contains that of this step, found once per
+      # distinct directory: "index:matched-length" pairs.
+      if (!(cwd in cand)) {
+        c = ""
         for (i = 1; i <= nr; i++) {
-          if (repoch[i] > t + 300) continue
           len = 0
           if (under(cwd, rcwd[i])) len = length(rcwd[i])
           if (under(cwd, rphys[i]) && length(rphys[i]) > len) len = length(rphys[i])
-          if (len == 0) continue
-          if (len > bestlen || (len == bestlen && repoch[i] > bestepoch)) {
-            bestlen = len; bestepoch = repoch[i]; home = rhome[i]; task = rtask[i]
+          if (len > 0) c = c " " i ":" len
+        }
+        cand[cwd] = c
+      }
+      nc = split(cand[cwd], cl, " ")
+      bestlen = 0; bestepoch = -1
+      for (ci = 1; ci <= nc; ci++) {
+        split(cl[ci], cp, ":"); i = cp[1] + 0; len = cp[2] + 0
+        if (repoch[i] > t) continue
+        if (len > bestlen || (len == bestlen && repoch[i] > bestepoch)) {
+          bestlen = len; bestepoch = repoch[i]; home = rhome[i]; task = rtask[i]
+        }
+      }
+      if (home == "") {
+        best = 0
+        for (i = 1; i <= nh; i++) {
+          if (hhost[i] == "" && under(cwd, hpath[i]) && length(hpath[i]) > best) {
+            best = length(hpath[i]); home = hlabel[i]
+            task = (entry ~ /^sdk/) ? "(supervision host)" : "(firstmate)"
           }
         }
       }
@@ -345,7 +376,7 @@ cmd_report() {
     }
     END {
       if (tsv == 1) {
-        print "config_dir", "account", "home", "task", "steps", "input", "cache_write", "cache_read", "output", "usd"
+        print "config_dir", "account_now", "home", "task", "steps", "input", "cache_write", "cache_read", "output", "usd"
         for (i = 1; i <= nk; i++) {
           split(keys[i], kk, SUBSEP)
           printf "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.2f\n", kk[1], account[kk[1]], kk[2], kk[3], steps[keys[i]], in_t[keys[i]], cw_t[keys[i]], cr_t[keys[i]], out_t[keys[i]], usd_t[keys[i]]
@@ -362,7 +393,11 @@ cmd_report() {
       if (ndirs == 0) printf "\nNo Claude steps found in the window.\n"
       for (d = 1; d <= ndirs; d++) {
         dir = dir_order[d]
-        printf "\n%s (%s): %s steps, ~US$%.2f\n", tilde(dir), account[dir], commas(dsteps[dir]), dusd[dir]
+        printf "\n%s (signed in now as %s): %s steps, ~US$%.2f\n", tilde(dir), account[dir], commas(dsteps[dir]), dusd[dir]
+        if (other_accounts[dir] != "") {
+          oa = other_accounts[dir]; gsub(/^ +| +$/, "", oa); gsub(/  +/, ", ", oa)
+          printf "  Launches in this window also recorded this folder signed in as %s; its rows may mix accounts.\n", oa
+        }
         printf "  %-14s %-36s %8s %10s %12s %10s %6s\n", "home", "task", "steps", "output", "cache-read", "~US$", "share"
         # Homes by cost, each followed by its tasks by cost.
         nhd = 0
@@ -387,9 +422,23 @@ cmd_report() {
     }' "$steps_file"
 }
 
+# Run the report under one hard bound covering every step of it.
+cmd_report_bounded() {
+  local rc
+  [ "${FM_USAGE_INNER:-}" != 1 ] || { cmd_report "$@"; return; }
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  fm_run_timed "$SCAN_TIMEOUT" env FM_USAGE_INNER=1 "$0" report "$@"
+  rc=$?
+  if fm_timed_out "$rc"; then
+    die "the report took longer than ${SCAN_TIMEOUT}s; narrow --since or raise FM_USAGE_TIMEOUT"
+  fi
+  return "$rc"
+}
+
 case "${1:-}" in
   record) shift; cmd_record "$@" ;;
-  report) shift; cmd_report "$@" ;;
+  report) shift; cmd_report_bounded "$@" ;;
   -h|--help|help) usage ;;
-  *) cmd_report "$@" ;;
+  *) cmd_report_bounded "$@" ;;
 esac

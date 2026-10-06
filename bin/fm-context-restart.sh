@@ -26,10 +26,16 @@
 #      then ends its turn. --stowed is the model's statement that the stow pass
 #      finished; durable fleet state (the wake queue, backlog, task records)
 #      already lives on disk and nothing here acknowledges or deletes it.
-#   3. inject (detached) waits until the pane is idle with an empty composer,
-#      types /clear, waits for session-hook to observe the cleared
-#      conversation, then submits one record-backed session-start operational
-#      input so the fresh conversation takes a turn. /clear keeps the same
+#   3. inject (detached) waits until the turn that ran `restart` has ended (the
+#      stop-hook records it) and the pane is idle with an empty composer, types
+#      /clear, waits for session-hook to observe the cleared conversation,
+#      then submits one record-backed session-start operational input so the
+#      fresh conversation takes a turn, retrying that submit until its
+#      deadline. If any later turn (a wake or a captain message) adds a step
+#      before the clear, the stop-hook cancels the request at that turn's end
+#      and offers the restart again, so the stow pass is repeated first; after
+#      three such cancellations in one conversation it gives up and says so. A
+#      /clear typed by hand meanwhile is accepted and only the notice is sent. /clear keeps the same
 #      Claude process, so the session lock, its Remote Control link, and the
 #      launcher's own arguments are untouched; the SessionStart hook re-emits
 #      the bin/fm-session-start.sh digest (wake queue included) for the lock
@@ -38,8 +44,10 @@
 #      away session away.
 #   4. session-hook (tracked Claude SessionStart hook) records the clear when a
 #      request is pending for this lock owner.
-#   A failed or abandoned restart is reported to the model once, by the next
-#   Stop in the same conversation, so it can tell the captain.
+#   A failed or abandoned restart is reported to the model once, so it can
+#   tell the captain: by the next Stop in the same conversation when the clear
+#   never happened, or by the cleared conversation's first Stop when only the
+#   notice failed.
 #
 # Configuration: config/context-restart (local, gitignored). Absent = off and
 # each hook costs one file test. Its first line that is not blank and not a
@@ -58,7 +66,8 @@
 #
 # Durable records live in state/context-restart/: floor (conversation id and
 # its first measured context), prompted (conversation id already told to
-# restart, then its measured context), request (key=value), cleared, result, reported, and
+# restart, then its measured context), turn-end (transcript and assistant-step
+# count when the restarting turn ended), cancels, request (key=value), cleared, result, reported, and
 # an append-only log. Context is the last main-chain assistant step's
 # input + cache-creation + cache-read tokens, read from a bounded tail of the
 # transcript Claude names in the hook payload.
@@ -222,6 +231,15 @@ measure_context() {  # <transcript>
   printf '%s\n' "$out"
 }
 
+# Print how many assistant steps <transcript> holds (0 when unreadable).
+assistant_steps() {  # <transcript>
+  local n
+  [ -n "$1" ] && [ -f "$1" ] || { echo 0; return 0; }
+  n=$(grep -c -F '"type":"assistant"' "$1" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  echo "$n"
+}
+
 # --- pane endpoint ----------------------------------------------------------
 ENDPOINT_BACKEND=
 ENDPOINT_TARGET=
@@ -305,7 +323,7 @@ block() {  # <reason>
 
 # --- stop-hook --------------------------------------------------------------
 cmd_stop_hook() {
-  local payload transcript session ctx req_session reported floor trigger
+  local payload transcript session ctx req_session reported floor trigger cancels cleared_session
   [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ] || exit 0
   payload=$(cat 2>/dev/null || true)
   [ -n "$payload" ] || exit 0
@@ -317,26 +335,58 @@ cmd_stop_hook() {
   session=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
   [ -n "$session" ] || exit 0
 
-  # A restart this conversation asked for: stay quiet while it runs, and report
-  # a failure or an abandoned injector once.
+  # A restart this conversation asked for. The first turn end after the
+  # request is the turn that ran `restart`; record how many assistant steps
+  # the transcript held then, so the injector can tell whether any later turn
+  # (a wake, a captain message) ran before the clear. A later turn end while
+  # the request is still pending means exactly that: cancel it so the stow
+  # pass is repeated, and offer the restart again below, at most twice per
+  # conversation. A failure or an abandoned injector is reported once.
   req_session=$(request_get session)
   if [ -n "$req_session" ] && [ "$req_session" = "$session" ]; then
     if request_pending; then
-      exit 0
-    fi
-    reported=$(first_line "$DIR/reported")
-    if [ "$reported" != "$session" ]; then
-      if ! read_result; then
-        RESULT_STATE=failed
-        RESULT_REASON="the restart helper stopped without finishing"
-        record_result failed "$RESULT_REASON"
+      if [ ! -f "$DIR/turn-end" ]; then
+        printf '%s\n%s\n' "$transcript" "$(assistant_steps "$transcript")" | write_atomic "$DIR/turn-end" || true
+        exit 0
       fi
-      if [ "$RESULT_STATE" = failed ]; then
+      [ "$(assistant_steps "$transcript")" -gt "$(sed -n 2p "$DIR/turn-end" 2>/dev/null || echo 0)" ] || exit 0
+      record_result cancelled "a later turn ran before the clear, so the stow pass may be out of date"
+      cancels=$(sed -n 2p "$DIR/cancels" 2>/dev/null)
+      [ "$(first_line "$DIR/cancels")" = "$session" ] || cancels=0
+      case "$cancels" in ''|*[!0-9]*) cancels=0 ;; esac
+      cancels=$((cancels + 1))
+      printf '%s\n%s\n' "$session" "$cancels" | write_atomic "$DIR/cancels" || true
+      if [ "$cancels" -ge 3 ]; then
         printf '%s\n' "$session" | write_atomic "$DIR/reported" || true
-        block "Context restart did not complete: ${RESULT_REASON:-no reason recorded}. This conversation is still at about $(request_get context) tokens. Tell the captain the automatic restart failed and why, and ask them to type /clear in this session when convenient; do not retry the restart yourself in this conversation."
+        block "Context restart gave up: new work kept arriving before the clear, three times. This conversation is still at about $(request_get context) tokens. Tell the captain the automatic restart could not find a quiet moment, and ask them to type /clear in this session when convenient; do not retry the restart yourself in this conversation."
       fi
+      rm -f "$DIR/prompted" 2>/dev/null || true
+    else
+      reported=$(first_line "$DIR/reported")
+      if [ "$reported" != "$session" ] && [ ! -f "$DIR/cleared" ]; then
+        if ! read_result; then
+          RESULT_STATE=failed
+          RESULT_REASON="the restart helper stopped without finishing"
+          record_result failed "$RESULT_REASON"
+        fi
+        if [ "$RESULT_STATE" = failed ]; then
+          printf '%s\n' "$session" | write_atomic "$DIR/reported" || true
+          block "Context restart did not complete: ${RESULT_REASON:-no reason recorded}. This conversation is still at about $(request_get context) tokens. Tell the captain the automatic restart failed and why, and ask them to type /clear in this session when convenient; do not retry the restart yourself in this conversation."
+        fi
+      fi
+      read_result || true
+      [ "$RESULT_STATE" = cancelled ] || exit 0
     fi
-    exit 0
+  fi
+
+  # A failure after the clear belongs to the cleared conversation: its restart
+  # notice never arrived, so tell it once what the notice would have said.
+  cleared_session=$(first_line "$DIR/cleared")
+  cleared_session=${cleared_session#* }
+  if [ -n "$cleared_session" ] && [ "$cleared_session" = "$session" ] && ! request_pending \
+    && read_result && [ "$RESULT_STATE" = failed ] && [ "$(first_line "$DIR/reported")" != "$session" ]; then
+    printf '%s\n' "$session" | write_atomic "$DIR/reported" || true
+    block "Context restart cleared the previous conversation, but its restart notice did not arrive (${RESULT_REASON:-no reason recorded}). The bin/fm-session-start.sh digest at the start of this conversation is current: handle its wake queue and any OPEN DECISIONS or UNREAD STATUS it shows, then resume the emitted supervision protocol. Do not type /clear again."
   fi
 
   ctx=$(measure_context "$transcript") || exit 0
@@ -412,7 +462,7 @@ cmd_restart() {
   ctx=
   [ "$(first_line "$DIR/prompted")" != "$session" ] || ctx=$(sed -n 2p "$DIR/prompted" 2>/dev/null)
   mkdir -p "$DIR" 2>/dev/null || refuse "cannot create $DIR"
-  rm -f "$DIR/cleared" "$DIR/result" "$DIR/reported" 2>/dev/null || true
+  rm -f "$DIR/cleared" "$DIR/result" "$DIR/reported" "$DIR/turn-end" 2>/dev/null || true
   write_atomic "$DIR/request" <<EOF || refuse "cannot write $DIR/request"
 session=$session
 pid=$pid
@@ -435,7 +485,7 @@ EOF
 
 # --- inject -----------------------------------------------------------------
 cmd_inject() {
-  local backend target pid at deadline sent_at cleared_at verdict doorbell body ctx
+  local backend target pid at deadline cleared_at verdict doorbell body ctx transcript steps
   [ -f "$DIR/request" ] || exit 1
   backend=$(request_get backend)
   target=$(request_get target)
@@ -461,31 +511,38 @@ cmd_inject() {
     done
   }
 
-  wait_ready "typing /clear"
-  sent_at=$(now)
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "/clear" 3 0.5 0.5 2>/dev/null)
-  [ "$verdict" = empty ] || { record_result failed "typing /clear was not confirmed (verdict=${verdict:-none})"; exit 1; }
-  log_line "typed /clear into $backend:$target"
+  # Type /clear only once the turn that ran `restart` has ended (the
+  # stop-hook records its assistant-step count) and no later turn has added a
+  # step since. A later turn makes the stop-hook cancel this request at that
+  # turn's end, so the stow pass is repeated first; a /clear typed by hand in
+  # the meantime is accepted and only the notice is still sent.
+  while :; do
+    owner_unchanged
+    [ ! -f "$DIR/result" ] || { log_line "injector stopped: $(first_line "$DIR/result")"; exit 0; }
+    [ ! -f "$DIR/cleared" ] || break
+    if [ -f "$DIR/turn-end" ]; then
+      transcript=$(sed -n 1p "$DIR/turn-end" 2>/dev/null)
+      steps=$(sed -n 2p "$DIR/turn-end" 2>/dev/null)
+      if [ "$(assistant_steps "$transcript")" = "$steps" ] && pane_ready "$backend" "$target"; then
+        verdict=$(fm_backend_send_text_submit "$backend" "$target" "/clear" 3 0.5 0.5 2>/dev/null)
+        [ "$verdict" = empty ] || { record_result failed "typing /clear was not confirmed (verdict=${verdict:-none})"; exit 1; }
+        log_line "typed /clear into $backend:$target"
+        break
+      fi
+    fi
+    [ "$(now)" -lt "$deadline" ] || { record_result failed "the turn that requested the restart never reached a quiet, empty composer"; exit 1; }
+    sleep "$POLL"
+  done
 
   while :; do
     owner_unchanged
     cleared_at=$(first_line "$DIR/cleared")
     cleared_at=${cleared_at%% *}
-    case "$cleared_at" in
-      ''|*[!0-9]*) ;;
-      *) [ "$cleared_at" -lt "$sent_at" ] || break ;;
-    esac
+    case "$cleared_at" in ''|*[!0-9]*) ;; *) break ;; esac
     [ "$(now)" -lt "$deadline" ] || { record_result failed "/clear was typed but the cleared session never started"; exit 1; }
     sleep "$POLL"
   done
 
-  # The cleared conversation's own SessionStart hooks (the session-start
-  # digest among them) begin with this record written; require two idle reads
-  # in a row so the notice lands after their spinner, not in the gap before
-  # it is drawn.
-  wait_ready "the restart notice"
-  sleep "$POLL"
-  wait_ready "the restart notice"
   body="Context restart: this conversation was cleared automatically after a stow pass because the previous one reached about ${ctx:-unknown} tokens (threshold $(request_get threshold), config/context-restart). The bin/fm-session-start.sh digest above is current: handle its wake queue and any OPEN DECISIONS or UNREAD STATUS it shows, then resume the emitted supervision protocol. Tell the captain only what that digest makes captain-relevant."
   if fm_operational_harness_needs_record claude; then
     fm_operational_record_write "$STATE" session-start "$body" doorbell \
@@ -494,8 +551,21 @@ cmd_inject() {
     fm_operational_input_encode session-start "$body" doorbell \
       || { record_result failed "the restart notice could not be encoded"; exit 1; }
   fi
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$doorbell" 3 0.5 0.5 2>/dev/null)
-  [ "$verdict" = empty ] || { record_result failed "the restart notice was not confirmed submitted (verdict=${verdict:-none})"; exit 1; }
+  # The cleared conversation's own SessionStart hooks (the session-start
+  # digest among them) begin with the clear record written; require two idle
+  # reads in a row so the notice lands after their spinner, not in the gap
+  # before it is drawn. A submit that is not confirmed is retried until the
+  # deadline, because the cleared conversation has no other prompt to act on.
+  while :; do
+    wait_ready "the restart notice"
+    sleep "$POLL"
+    wait_ready "the restart notice"
+    verdict=$(fm_backend_send_text_submit "$backend" "$target" "$doorbell" 3 0.5 0.5 2>/dev/null)
+    [ "$verdict" != empty ] || break
+    log_line "restart notice not confirmed (verdict=${verdict:-none}); retrying"
+    [ "$(now)" -lt "$deadline" ] || { record_result failed "the restart notice was not confirmed submitted (verdict=${verdict:-none})"; exit 1; }
+    sleep $((POLL * 5))
+  done
   record_result "done" "cleared and notified at $(now)"
   exit 0
 }

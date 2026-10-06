@@ -693,6 +693,7 @@ That command types `/clear` into the session's own pane when the turn has ended 
 `/clear` keeps the same Claude process, so the session lock, Remote Control, the way the captain launched the session, the supervision watcher, and an away or quiet posture all carry over; queued wakes are never acknowledged by the restart.
 
 The restart needs the primary to run inside a tmux, Herdr, or cmux pane, because that is how it types `/clear`.
+If a wake or a captain message starts another turn before the clear, the restart is called off and offered again, so the stow pass is repeated first.
 In a plain terminal tab it refuses and the session asks the captain to type `/clear`; a failed restart is likewise reported once so the captain hears about it.
 Only the main home's lock-owning Claude primary is in scope: second mate homes, task worktrees, the supervision host, and other harnesses never restart this way, and the file is not inherited by second mate homes.
 
