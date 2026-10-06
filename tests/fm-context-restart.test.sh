@@ -333,6 +333,51 @@ test_post_clear_failure_reaches_successor() {
   pass "context restart: a failure after the clear is reported once to the cleared conversation"
 }
 
+# A request offered again after a cancellation replaces the old one; the old
+# injector must leave without touching the new request's records.
+test_old_injector_yields_to_new_request() {
+  local dir holder injector i
+  dir=$(make_primary_dir "$TMP_ROOT/gen")
+  printf '200k\n' > "$dir/config/context-restart"
+  mkdir -p "$dir/state/context-restart"
+  sleep 60 >/dev/null 2>&1 &
+  holder=$!
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  printf 'session=S1\npid=%s\nbackend=tmux\ntarget=%%9\nthreshold=200000\ncontext=250000\nrequested_at=%s\ngen=old\n' "$holder" "$(date +%s)" \
+    > "$dir/state/context-restart/request"
+  env "${SCRUB[@]}" FM_CONTEXT_RESTART_POLL=1 "$dir/bin/fm-context-restart.sh" inject >/dev/null 2>&1 &
+  injector=$!
+  sleep 2
+  sed -i.bak 's/^gen=old$/gen=new/' "$dir/state/context-restart/request"
+  for i in $(seq 1 20); do kill -0 "$injector" 2>/dev/null || break; sleep 0.5; done
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  if kill -0 "$injector" 2>/dev/null; then
+    kill "$injector" 2>/dev/null || true
+    fail "the old injector kept running after a newer request replaced it"
+  fi
+  [ ! -e "$dir/state/context-restart/result" ] || fail "the old injector wrote a result for the newer request"
+  assert_grep 'injector for an older request stopped' "$dir/state/context-restart/log" "the old injector says why it left"
+  pass "context restart: an injector whose request was replaced leaves without touching the new request"
+}
+
+# An injector that dies after the clear leaves no result; the cleared
+# conversation still hears about the missing notice once the request expires.
+test_silent_post_clear_death_reported() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/postclear-dead")
+  printf '200k\n' > "$dir/config/context-restart"
+  mkdir -p "$dir/state/context-restart"
+  write_transcript "$dir/t.jsonl" 70000
+  stop_payload "$dir/p.json" S2 "$dir/t.jsonl"
+  printf 'session=S1\npid=1\nbackend=tmux\ntarget=%%1\nthreshold=200000\ncontext=250000\nrequested_at=%s\ngen=g\n' "$(( $(date +%s) - 4000 ))" \
+    > "$dir/state/context-restart/request"
+  printf '%s S2\n' "$(( $(date +%s) - 3900 ))" > "$dir/state/context-restart/cleared"
+  out=$(as_primary "$dir" S2 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_contains "$out" "stopped after the clear" "a silent death after the clear is reported to the cleared conversation"
+  pass "context restart: an injector that dies after the clear is still reported to the cleared conversation"
+}
+
 # End to end through the real injector: a private tmux pane runs a composer
 # that logs submitted lines; the fake primary requests the restart, the
 # injector types /clear, the test plays Claude's SessionStart hook when the
@@ -375,7 +420,20 @@ LOOP
   sleep 1
   shim="$dir/shim"
   mkdir -p "$shim"
-  printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$real_tmux" "$socket" > "$shim/tmux"
+  # The shim drops as many Enter key presses as $dir/swallow names, to stand
+  # in for a TUI that misses Enter.
+  cat > "$shim/tmux" <<SHIM
+#!/usr/bin/env bash
+if [ "\${1:-}" = send-keys ] && [ -s "$dir/swallow" ]; then
+  n=\$(cat "$dir/swallow")
+  if [ "\$n" -gt 0 ]; then
+    for a in "\$@"; do
+      if [ "\$a" = Enter ]; then printf '%s\\n' \$((n - 1)) > "$dir/swallow"; exit 0; fi
+    done
+  fi
+fi
+exec "$real_tmux" -L "$socket" "\$@"
+SHIM
   chmod +x "$shim/tmux"
 
   env "${SCRUB[@]}" PATH="$shim:$PATH" TMUX="/tmp/fm-ctx-fake,1,0" TMUX_PANE="$pane" \
@@ -387,6 +445,7 @@ LOOP
       bin/fm-context-restart.sh restart --stowed > restart.out 2>&1 || exit 1
       printf "%s\n" "{\"session_id\":\"S1\",\"transcript_path\":\"$FM_TEST_DIR/t.jsonl\"}" | bin/fm-context-restart.sh stop-hook
       for i in $(seq 1 60); do grep -qx "/clear" "$FM_TEST_LOG" && break; sleep 0.5; done
+      printf "5\n" > "$FM_TEST_DIR/swallow"
       printf "%s\n" "{\"session_id\":\"S2\",\"source\":\"clear\"}" | CLAUDE_CODE_SESSION_ID=S2 bin/fm-context-restart.sh session-hook
       for i in $(seq 1 60); do [ -e state/context-restart/result ] && break; sleep 0.5; done
       :' >/dev/null 2>&1
@@ -398,11 +457,12 @@ LOOP
   [ "$(sed -n 1p "$log")" = "/clear" ] || fail "first submission must be /clear, got: $(cat "$log")"
   assert_contains "$(sed -n 2p "$log")" ": Firstmate operational input waiting: read '" "second submission is the operational doorbell"
   [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] || fail "expected exactly two submissions, got: $(cat "$log")"
+  [ "$(cat "$dir/swallow")" = 0 ] || fail "the notice was submitted without retrying through the swallowed Enter presses"
   i=$(sed -n 2p "$log" | sed "s/.*read '\\([^']*\\)'.*/\\1/")
   assert_grep 'FIRSTMATE_OP: v1 session-start: Context restart:' "$i" "the doorbell names a session-start operational record"
   cmp -s "$dir/afk.before" "$dir/state/.afk" || fail "the restart changed the away-mode record"
   cmp -s "$dir/queue.before" "$dir/state/.wake-queue" || fail "the restart changed the wake queue"
-  pass "context restart: end to end in tmux the injector types /clear, waits for the cleared session, then submits one restart notice, leaving away mode and the wake queue untouched"
+  pass "context restart: end to end in tmux the injector types /clear, waits for the cleared session, then submits one restart notice through swallowed Enter presses without retyping, leaving away mode and the wake queue untouched"
 }
 
 test_off_without_config
@@ -415,4 +475,6 @@ test_failure_reported_once
 test_session_hook_records_clear
 test_later_turn_cancels_pending_restart
 test_post_clear_failure_reaches_successor
+test_old_injector_yields_to_new_request
+test_silent_post_clear_death_reported
 test_injector_end_to_end_tmux

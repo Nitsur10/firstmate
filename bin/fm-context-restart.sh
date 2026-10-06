@@ -301,7 +301,13 @@ read_result() {
   return 0
 }
 
-record_result() {  # <done|failed> <reason>
+# An injector sets INJECT_GEN to its request's generation; once a newer
+# request replaces it, that injector records nothing.
+INJECT_GEN=
+record_result() {  # <done|failed|cancelled> <reason>
+  if [ -n "$INJECT_GEN" ] && [ "$(request_get gen)" != "$INJECT_GEN" ]; then
+    return 0
+  fi
   printf '%s %s\n' "$1" "$2" | write_atomic "$DIR/result" || true
   log_line "restart $1: $2"
 }
@@ -383,6 +389,14 @@ cmd_stop_hook() {
   # notice never arrived, so tell it once what the notice would have said.
   cleared_session=$(first_line "$DIR/cleared")
   cleared_session=${cleared_session#* }
+  if [ -n "$cleared_session" ] && [ "$cleared_session" = "$session" ] && ! request_pending \
+    && [ "$(first_line "$DIR/reported")" != "$session" ]; then
+    if ! read_result; then
+      RESULT_STATE=failed
+      RESULT_REASON="the restart helper stopped after the clear"
+      record_result failed "$RESULT_REASON"
+    fi
+  fi
   if [ -n "$cleared_session" ] && [ "$cleared_session" = "$session" ] && ! request_pending \
     && read_result && [ "$RESULT_STATE" = failed ] && [ "$(first_line "$DIR/reported")" != "$session" ]; then
     printf '%s\n' "$session" | write_atomic "$DIR/reported" || true
@@ -471,6 +485,7 @@ target=$ENDPOINT_TARGET
 threshold=$THRESHOLD
 context=${ctx:-unknown}
 requested_at=$(now)
+gen=$(now).$$.${RANDOM:-0}
 EOF
   # The injector must outlive this tool call and the turn that made it: nohup,
   # stdio detached, and its own process group, the shape
@@ -492,15 +507,38 @@ cmd_inject() {
   pid=$(request_get pid)
   at=$(request_get requested_at)
   ctx=$(request_get context)
+  INJECT_GEN=$(request_get gen)
   case "$at" in ''|*[!0-9]*) record_result failed "the restart request is malformed"; exit 1 ;; esac
+  [ -n "$INJECT_GEN" ] || { record_result failed "the restart request has no generation"; exit 1; }
   deadline=$((at + TIMEOUT))
   load_backend "$backend" || { record_result failed "the $backend adapter could not be loaded"; exit 1; }
   # shellcheck source=bin/fm-operational-input.sh
   . "$SCRIPT_DIR/fm-operational-input.sh"
 
   owner_unchanged() {
+    # A newer request (the restart offered again after a cancellation) owns
+    # every record from here on; this injector leaves quietly.
+    [ "$(request_get gen)" = "$INJECT_GEN" ] || { log_line "injector for an older request stopped"; exit 0; }
     kill -0 "$pid" 2>/dev/null || { record_result failed "the Claude process $pid exited before the restart finished"; exit 1; }
     [ "$(first_line "$STATE/.lock")" = "$pid" ] || { record_result failed "the session lock changed hands during the restart"; exit 1; }
+  }
+  # Type <text> once and submit it. When the submit is not confirmed but the
+  # text is still waiting in the composer, retry Enter only (never retype)
+  # until the deadline; an empty composer afterwards counts as submitted.
+  submit_text() {  # <text> <what>
+    local text=$1 what=$2 state
+    verdict=$(fm_backend_send_text_submit "$backend" "$target" "$text" 3 0.5 0.5 2>/dev/null)
+    [ "$verdict" != empty ] || return 0
+    [ "$verdict" != send-failed ] || { record_result failed "typing $what failed"; exit 1; }
+    log_line "$what not confirmed (verdict=${verdict:-none}); retrying Enter"
+    while :; do
+      owner_unchanged
+      state=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+      [ "$state" != empty ] || return 0
+      [ "$(now)" -lt "$deadline" ] || { record_result failed "$what was typed but never confirmed submitted (composer=${state:-unknown})"; exit 1; }
+      case "$state" in pending*) fm_backend_send_key "$backend" "$target" Enter >/dev/null 2>&1 || true ;; esac
+      sleep "$POLL"
+    done
   }
   wait_ready() {  # <what>
     while :; do
@@ -523,9 +561,11 @@ cmd_inject() {
     if [ -f "$DIR/turn-end" ]; then
       transcript=$(sed -n 1p "$DIR/turn-end" 2>/dev/null)
       steps=$(sed -n 2p "$DIR/turn-end" 2>/dev/null)
-      if [ "$(assistant_steps "$transcript")" = "$steps" ] && pane_ready "$backend" "$target"; then
-        verdict=$(fm_backend_send_text_submit "$backend" "$target" "/clear" 3 0.5 0.5 2>/dev/null)
-        [ "$verdict" = empty ] || { record_result failed "typing /clear was not confirmed (verdict=${verdict:-none})"; exit 1; }
+      # The step count is read last, right before typing, to keep the window
+      # in which new input could slip in ahead of /clear as small as possible.
+      if pane_ready "$backend" "$target" && [ "$(assistant_steps "$transcript")" = "$steps" ] \
+        && [ ! -f "$DIR/result" ] && [ ! -f "$DIR/cleared" ]; then
+        submit_text "/clear" "/clear"
         log_line "typed /clear into $backend:$target"
         break
       fi
@@ -554,18 +594,11 @@ cmd_inject() {
   # The cleared conversation's own SessionStart hooks (the session-start
   # digest among them) begin with the clear record written; require two idle
   # reads in a row so the notice lands after their spinner, not in the gap
-  # before it is drawn. A submit that is not confirmed is retried until the
-  # deadline, because the cleared conversation has no other prompt to act on.
-  while :; do
-    wait_ready "the restart notice"
-    sleep "$POLL"
-    wait_ready "the restart notice"
-    verdict=$(fm_backend_send_text_submit "$backend" "$target" "$doorbell" 3 0.5 0.5 2>/dev/null)
-    [ "$verdict" != empty ] || break
-    log_line "restart notice not confirmed (verdict=${verdict:-none}); retrying"
-    [ "$(now)" -lt "$deadline" ] || { record_result failed "the restart notice was not confirmed submitted (verdict=${verdict:-none})"; exit 1; }
-    sleep $((POLL * 5))
-  done
+  # before it is drawn.
+  wait_ready "the restart notice"
+  sleep "$POLL"
+  wait_ready "the restart notice"
+  submit_text "$doorbell" "the restart notice"
   record_result "done" "cleared and notified at $(now)"
   exit 0
 }
