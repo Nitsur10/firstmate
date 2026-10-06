@@ -103,18 +103,18 @@ test_threshold_parsing() {
   assert_contains "$out" "threshold 250000" "k suffix after comment and blank lines"
   printf '1000\n' > "$dir/config/context-restart"
   out=$(env "${SCRUB[@]}" "$dir/bin/fm-context-restart.sh" status)
-  assert_contains "$out" "below the 50000 minimum" "a loop-prone threshold is refused"
+  assert_contains "$out" "below the 50000 minimum" "a threshold below a fresh session's size is refused"
   printf 'lots\n' > "$dir/config/context-restart"
   out=$(env "${SCRUB[@]}" "$dir/bin/fm-context-restart.sh" status)
   assert_contains "$out" "inert" "a malformed threshold keeps the feature inert"
-  pass "context restart: threshold parsing accepts N and Nk, defaults when empty, refuses malformed and loop-prone values"
+  pass "context restart: threshold parsing accepts N and Nk, defaults when empty, refuses malformed and too-small values"
 }
 
 test_blocks_once_over_threshold() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/block")
   printf '200k\n' > "$dir/config/context-restart"
-  write_transcript "$dir/small.jsonl" 150000
+  write_transcript "$dir/small.jsonl" 60000
   stop_payload "$dir/p.json" S1 "$dir/small.jsonl"
   out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1); status=$?
   expect_code 0 "$status" "under threshold"
@@ -132,9 +132,36 @@ test_blocks_once_over_threshold() {
   out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
   assert_equals "" "$out" "the same conversation is told only once"
   stop_payload "$dir/p2.json" S2 "$dir/big.jsonl"
+  write_transcript "$dir/mid.jsonl" 120000
+  stop_payload "$dir/p2.json" S2 "$dir/mid.jsonl"
   out=$(as_primary "$dir" S2 'bin/fm-context-restart.sh stop-hook' "$dir/p2.json" 2>&1)
-  assert_contains "$out" '"block"' "a new conversation over the threshold is told again"
+  assert_equals "" "$out" "a new conversation under the threshold is not told"
+  write_transcript "$dir/bigger.jsonl" 230000
+  stop_payload "$dir/p2.json" S2 "$dir/bigger.jsonl"
+  out=$(as_primary "$dir" S2 'bin/fm-context-restart.sh stop-hook' "$dir/p2.json" 2>&1)
+  assert_contains "$out" '"block"' "a new conversation past its restart point is told again"
   pass "context restart: stop-hook blocks once per conversation at or over the threshold, ignoring sidechain steps"
+}
+
+# A conversation that starts at or above the threshold - the live lab's fresh
+# session measured about 58k against a 50k threshold and restarted again at
+# once - gets half a threshold of room beyond its first measured context.
+test_floor_prevents_restart_loop() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/floor")
+  printf '200k\n' > "$dir/config/context-restart"
+  write_transcript "$dir/start.jsonl" 210000
+  stop_payload "$dir/p.json" S9 "$dir/start.jsonl"
+  out=$(as_primary "$dir" S9 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_equals "" "$out" "a conversation that starts over the threshold is not told at once"
+  write_transcript "$dir/grown.jsonl" 300000
+  stop_payload "$dir/p.json" S9 "$dir/grown.jsonl"
+  out=$(as_primary "$dir" S9 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_equals "" "$out" "it is not told before growing half a threshold past its start"
+  write_transcript "$dir/grown.jsonl" 310000
+  out=$(as_primary "$dir" S9 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_contains "$out" '"block"' "it is told once it has grown half a threshold past its start"
+  pass "context restart: a conversation that starts over the threshold restarts only after growing half a threshold, so restarts cannot loop"
 }
 
 test_out_of_scope_sessions_stay_silent() {
@@ -305,6 +332,7 @@ LOOP
 test_off_without_config
 test_threshold_parsing
 test_blocks_once_over_threshold
+test_floor_prevents_restart_loop
 test_out_of_scope_sessions_stay_silent
 test_restart_refusals
 test_failure_reported_once

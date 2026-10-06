@@ -683,7 +683,8 @@ Without it nothing changes: the tracked Stop and SessionStart hooks that serve i
 
 The file's first line that is not blank and not a `#` comment is the threshold in tokens, written as an integer or with a `k` suffix, such as `200000` or `200k`.
 An empty file uses `200000`.
-A value below `50000` is refused, because a fresh session that has just read its startup digest can sit near that size and would restart in a loop; a refused or malformed value leaves the feature inert, and `bin/fm-context-restart.sh status` names the problem.
+A value below `50000` is refused, because a fresh session that has just read its startup digest already sits near that size; a refused or malformed value leaves the feature inert, and `bin/fm-context-restart.sh status` names the problem.
+A conversation whose first measured context is already high is restarted only after it grows by half the threshold beyond that starting point, so a restarted session never restarts again straight away.
 
 ### What happens at the threshold
 

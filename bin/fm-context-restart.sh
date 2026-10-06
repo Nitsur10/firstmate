@@ -14,9 +14,12 @@
 #
 # Flow:
 #   1. stop-hook (tracked Claude Stop hook) measures the session's context from
-#      its transcript after each turn. At or above the threshold it blocks the
-#      stop once per conversation and tells the model to finish the wake in
-#      hand, run the stow pass, then run `restart --stowed`.
+#      its transcript after each turn. Once the context reaches the threshold,
+#      or the conversation's first measured context plus half the threshold if
+#      that is larger, it blocks the stop once per conversation and tells the
+#      model to finish the wake in hand, run the stow pass, then run
+#      `restart --stowed`. The floor rule keeps a restarted session that starts
+#      near the threshold from restarting again straight away.
 #   2. restart --stowed (run by the model) refuses unless the session owns the
 #      lock and runs inside a pane this script can type into (tmux, Herdr, or
 #      cmux), records a request, and starts the detached injector. The model
@@ -42,9 +45,9 @@
 # each hook costs one file test. Its first line that is not blank and not a
 # `#` comment is the threshold in tokens, as an integer or with a `k` suffix
 # (200000 or 200k); a file with no such line uses 200000. A threshold below
-# 50000 is refused, because a fresh session after its startup digest can sit
-# near that size and would restart in a loop. An invalid file keeps the
-# feature inert and is reported by `status`.
+# 50000 is refused, because a fresh session after its startup digest already
+# sits near that size (about 58k measured on a lab home) and would have no room
+# to work. An invalid file keeps the feature inert and is reported by `status`.
 #
 # Usage:
 #   fm-context-restart.sh stop-hook        Claude Stop hook; payload on stdin
@@ -53,8 +56,9 @@
 #   fm-context-restart.sh status           threshold, pending restart, recent log
 #   fm-context-restart.sh inject           internal: the detached injector
 #
-# Durable records live in state/context-restart/: prompted (conversation id
-# already told to restart, then its measured context), request (key=value), cleared, result, reported, and
+# Durable records live in state/context-restart/: floor (conversation id and
+# its first measured context), prompted (conversation id already told to
+# restart, then its measured context), request (key=value), cleared, result, reported, and
 # an append-only log. Context is the last main-chain assistant step's
 # input + cache-creation + cache-read tokens, read from a bounded tail of the
 # transcript Claude names in the hook payload.
@@ -148,7 +152,7 @@ read_threshold() {
     *) value=$((10#$value)) ;;
   esac
   if [ "$value" -lt "$MIN_THRESHOLD" ]; then
-    CONFIG_ERROR="config/context-restart threshold $value is below the $MIN_THRESHOLD minimum (a fresh session could restart in a loop)"
+    CONFIG_ERROR="config/context-restart threshold $value is below the $MIN_THRESHOLD minimum (a fresh session starts near that size)"
     return 1
   fi
   THRESHOLD=$value
@@ -301,7 +305,7 @@ block() {  # <reason>
 
 # --- stop-hook --------------------------------------------------------------
 cmd_stop_hook() {
-  local payload transcript session ctx req_session reported
+  local payload transcript session ctx req_session reported floor trigger
   [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ] || exit 0
   payload=$(cat 2>/dev/null || true)
   [ -n "$payload" ] || exit 0
@@ -336,11 +340,23 @@ cmd_stop_hook() {
   fi
 
   ctx=$(measure_context "$transcript") || exit 0
-  [ "$ctx" -ge "$THRESHOLD" ] || exit 0
+  # The first context measured in a conversation is its floor. The prompt
+  # fires at the threshold or at the floor plus half the threshold, whichever
+  # is larger, so a conversation that starts above the threshold (a large
+  # startup digest, or one long first turn) still has room to work and a
+  # restarted session can never restart again straight away.
+  floor=
+  [ "$(first_line "$DIR/floor")" != "$session" ] || floor=$(sed -n 2p "$DIR/floor" 2>/dev/null)
+  case "$floor" in
+    ''|*[!0-9]*) floor=$ctx; printf '%s\n%s\n' "$session" "$ctx" | write_atomic "$DIR/floor" || true ;;
+  esac
+  trigger=$((floor + THRESHOLD / 2))
+  [ "$trigger" -ge "$THRESHOLD" ] || trigger=$THRESHOLD
+  [ "$ctx" -ge "$trigger" ] || exit 0
   [ "$(first_line "$DIR/prompted")" != "$session" ] || exit 0
   printf '%s\n%s\n' "$session" "$ctx" | write_atomic "$DIR/prompted" || exit 0
-  log_line "prompted session=$session context=$ctx threshold=$THRESHOLD"
-  block "Context restart: this primary session's context is about $ctx tokens, at or past the $THRESHOLD-token threshold in config/context-restart. Restart it now, before taking new work: finish handling any wake already in hand (acknowledge only what you handled), then load the stow skill and run its complete pass so this session's knowledge and open work records are on disk. Then run \`bin/fm-context-restart.sh restart --stowed\` and end your turn without further tool calls. That clears this conversation when the turn ends; the cleared session receives the bin/fm-session-start.sh digest (including any queued wakes) and a restart notice, and resumes supervision. If restart refuses, tell the captain why in one line and continue normally."
+  log_line "prompted session=$session context=$ctx threshold=$THRESHOLD floor=$floor"
+  block "Context restart: this primary session's context is about $ctx tokens, past its restart point in config/context-restart (threshold $THRESHOLD tokens). Restart it now, before taking new work: finish handling any wake already in hand (acknowledge only what you handled), then load the stow skill and run its complete pass so this session's knowledge and open work records are on disk. Then run \`bin/fm-context-restart.sh restart --stowed\` and end your turn without further tool calls. That clears this conversation when the turn ends; the cleared session receives the bin/fm-session-start.sh digest (including any queued wakes) and a restart notice, and resumes supervision. If restart refuses, tell the captain why in one line and continue normally."
 }
 
 # --- session-hook -----------------------------------------------------------
@@ -463,6 +479,12 @@ cmd_inject() {
     sleep "$POLL"
   done
 
+  # The cleared conversation's own SessionStart hooks (the session-start
+  # digest among them) begin with this record written; require two idle reads
+  # in a row so the notice lands after their spinner, not in the gap before
+  # it is drawn.
+  wait_ready "the restart notice"
+  sleep "$POLL"
   wait_ready "the restart notice"
   body="Context restart: this conversation was cleared automatically after a stow pass because the previous one reached about ${ctx:-unknown} tokens (threshold $(request_get threshold), config/context-restart). The bin/fm-session-start.sh digest above is current: handle its wake queue and any OPEN DECISIONS or UNREAD STATUS it shows, then resume the emitted supervision protocol. Tell the captain only what that digest makes captain-relevant."
   if fm_operational_harness_needs_record claude; then
