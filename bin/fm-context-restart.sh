@@ -31,7 +31,7 @@
 #      /clear, waits for session-hook to observe the cleared conversation,
 #      then submits one record-backed session-start operational input so the
 #      fresh conversation takes a turn, retrying that submit until its
-#      deadline. If any later turn (a wake or a captain message) adds a step
+#      deadline. If any later turn (a wake or a captain message) starts
 #      before the clear, the stop-hook cancels the request at that turn's end
 #      and offers the restart again, so the stow pass is repeated first; after
 #      three such cancellations in one conversation it gives up and says so. A
@@ -66,8 +66,8 @@
 #
 # Durable records live in state/context-restart/: floor (conversation id and
 # its first measured context), prompted (conversation id already told to
-# restart, then its measured context), turn-end (transcript and assistant-step
-# count when the restarting turn ended), cancels, request (key=value), cleared, result, reported, and
+# restart, then its measured context), turn-end (transcript and its count of
+# started turns when the restarting turn ended), cancels, request (key=value), cleared, result, reported, and
 # an append-only log. Context is the last main-chain assistant step's
 # input + cache-creation + cache-read tokens, read from a bounded tail of the
 # transcript Claude names in the hook payload.
@@ -231,11 +231,15 @@ measure_context() {  # <transcript>
   printf '%s\n' "$out"
 }
 
-# Print how many assistant steps <transcript> holds (0 when unreadable).
-assistant_steps() {  # <transcript>
+# Print how many user entries other than tool results <transcript> holds (0
+# when unreadable): one more appears whenever a new turn starts, from a typed
+# prompt or a delivered wake. Assistant steps are not counted, because Claude
+# Code can write a turn's final message after its Stop hooks have read the
+# file (measured on 2.1.292 in the live lab).
+turn_starts() {  # <transcript>
   local n
   [ -n "$1" ] && [ -f "$1" ] || { echo 0; return 0; }
-  n=$(grep -c -F '"type":"assistant"' "$1" 2>/dev/null)
+  n=$(grep -F '"type":"user"' "$1" 2>/dev/null | grep -c -v -F '"tool_result"')
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   echo "$n"
 }
@@ -342,9 +346,9 @@ cmd_stop_hook() {
   [ -n "$session" ] || exit 0
 
   # A restart this conversation asked for. The first turn end after the
-  # request is the turn that ran `restart`; record how many assistant steps
-  # the transcript held then, so the injector can tell whether any later turn
-  # (a wake, a captain message) ran before the clear. A later turn end while
+  # request is the turn that ran `restart`; record how many turns the
+  # transcript had started by then, so the injector can tell whether any
+  # later turn (a wake, a captain message) started before the clear. A later turn end while
   # the request is still pending means exactly that: cancel it so the stow
   # pass is repeated, and offer the restart again below, at most twice per
   # conversation. A failure or an abandoned injector is reported once.
@@ -352,10 +356,10 @@ cmd_stop_hook() {
   if [ -n "$req_session" ] && [ "$req_session" = "$session" ]; then
     if request_pending; then
       if [ ! -f "$DIR/turn-end" ]; then
-        printf '%s\n%s\n' "$transcript" "$(assistant_steps "$transcript")" | write_atomic "$DIR/turn-end" || true
+        printf '%s\n%s\n' "$transcript" "$(turn_starts "$transcript")" | write_atomic "$DIR/turn-end" || true
         exit 0
       fi
-      [ "$(assistant_steps "$transcript")" -gt "$(sed -n 2p "$DIR/turn-end" 2>/dev/null || echo 0)" ] || exit 0
+      [ "$(turn_starts "$transcript")" -gt "$(sed -n 2p "$DIR/turn-end" 2>/dev/null || echo 0)" ] || exit 0
       record_result cancelled "a later turn ran before the clear, so the stow pass may be out of date"
       cancels=$(sed -n 2p "$DIR/cancels" 2>/dev/null)
       [ "$(first_line "$DIR/cancels")" = "$session" ] || cancels=0
@@ -550,8 +554,8 @@ cmd_inject() {
   }
 
   # Type /clear only once the turn that ran `restart` has ended (the
-  # stop-hook records its assistant-step count) and no later turn has added a
-  # step since. A later turn makes the stop-hook cancel this request at that
+  # stop-hook records the transcript's turn count then) and no later turn has
+  # started since. A later turn makes the stop-hook cancel this request at that
   # turn's end, so the stow pass is repeated first; a /clear typed by hand in
   # the meantime is accepted and only the notice is still sent.
   while :; do
@@ -561,9 +565,9 @@ cmd_inject() {
     if [ -f "$DIR/turn-end" ]; then
       transcript=$(sed -n 1p "$DIR/turn-end" 2>/dev/null)
       steps=$(sed -n 2p "$DIR/turn-end" 2>/dev/null)
-      # The step count is read last, right before typing, to keep the window
+      # The turn count is read last, right before typing, to keep the window
       # in which new input could slip in ahead of /clear as small as possible.
-      if pane_ready "$backend" "$target" && [ "$(assistant_steps "$transcript")" = "$steps" ] \
+      if pane_ready "$backend" "$target" && [ "$(turn_starts "$transcript")" = "$steps" ] \
         && [ ! -f "$DIR/result" ] && [ ! -f "$DIR/cleared" ]; then
         submit_text "/clear" "/clear"
         log_line "typed /clear into $backend:$target"

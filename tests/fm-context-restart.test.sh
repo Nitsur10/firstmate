@@ -304,11 +304,21 @@ test_later_turn_cancels_pending_restart() {
   assert_equals "" "$out" "the turn that ran restart ends quietly"
   assert_grep "$dir/t.jsonl" "$dir/state/context-restart/turn-end" "its end is recorded for the injector"
   out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_equals "" "$out" "a repeated stop with no new step changes nothing"
-  [ ! -e "$dir/state/context-restart/result" ] || fail "a stop with no new step cancelled the restart"
-  printf '{"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"m9","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":260000,"output_tokens":1}}}\n' >> "$dir/t.jsonl"
+  assert_equals "" "$out" "a repeated stop with no new turn changes nothing"
+  [ ! -e "$dir/state/context-restart/result" ] || fail "a stop with no new turn cancelled the restart"
+  # The restarting turn's final message can land after its Stop hooks ran;
+  # that is not a later turn.
+  printf '{"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"m8","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":250000,"output_tokens":1}}}\n' >> "$dir/t.jsonl"
   out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
-  assert_grep 'cancelled ' "$dir/state/context-restart/result" "a later turn cancels the pending restart"
+  assert_equals "" "$out" "a late final message of the restarting turn changes nothing"
+  [ ! -e "$dir/state/context-restart/result" ] || fail "a late final message cancelled the restart"
+  {
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"a new wake"}}'
+    printf '{"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"m9","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":260000,"output_tokens":1}}}\n'
+  } >> "$dir/t.jsonl"
+  out=$(as_primary "$dir" S1 'bin/fm-context-restart.sh stop-hook' "$dir/p.json" 2>&1)
+  assert_grep 'cancelled ' "$dir/state/context-restart/result" "a later turn (a new user entry) cancels the pending restart"
   assert_contains "$out" "restart --stowed" "the restart is offered again, stow first"
   pass "context restart: a turn that runs before the clear cancels the pending restart and offers it again"
 }
