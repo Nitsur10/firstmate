@@ -80,7 +80,13 @@ tasks_in() {  # <home> <tasks-axi args...>
   (cd "$home" && tasks-axi "$@")
 }
 
+# Most cases here hold many calls in one repo, so they lift the call budget;
+# run_captain_budgeted keeps the captain's standing budget of three.
 run_captain() {  # <home> <command args...>
+  FM_CAPTAIN_CALL_BUDGET=${FM_CAPTAIN_CALL_BUDGET:-1000} run_captain_budgeted "$@"
+}
+
+run_captain_budgeted() {  # <home> <command args...>
   local home=$1
   shift
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
@@ -4629,6 +4635,148 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+# The captain's standing budget: at most three open captain calls per repo in a
+# home. A fourth untagged call is refused before any row is minted; a
+# budget-exempt tag, a repeat hold, another repo, a deferral, or an answer each
+# let work through, and nothing already held is rewritten by a refusal.
+test_call_budget_refuses_a_fourth_untagged_call() {
+  local home before err id
+  home=$(make_home call-budget)
+  for id in sample-budget-1 sample-budget-2 sample-budget-3; do
+    run_captain_budgeted "$home" hold "$id" --title "Budget call $id" --reason "pick for $id" \
+      --repo sample >/dev/null || fail "could not hold $id within the budget"
+  done
+  before=$(cat "$home/data/backlog.md")
+  if run_captain_budgeted "$home" hold sample-budget-4 --title "Fourth call" --reason "pick again" \
+    --repo sample > "$home/fourth.out" 2> "$home/fourth.err"; then
+    fail "hold accepted a fourth untagged captain call for one repo"
+  fi
+  err=$(cat "$home/fourth.err")
+  assert_contains "$err" "repo sample already has 3 open captain calls" "the refusal did not count the open calls"
+  assert_contains "$err" "sample-budget-1, sample-budget-2, sample-budget-3" "the refusal did not name the open calls"
+  assert_contains "$err" "spend:, production:, compliance:, security:, irreversible:" "the refusal did not name the exempt tags"
+  assert_equals "$before" "$(cat "$home/data/backlog.md")" "a refused hold changed the backlog"
+  if run_captain_budgeted "$home" hold sample-budget-4 --title "Fourth call" --reason "pick again" \
+    --kind security --repo sample > "$home/kind-only.out" 2> "$home/kind-only.err"; then
+    fail "an explicit kind without the reason tag bypassed the budget"
+  fi
+  if run_captain_budgeted "$home" hold sample-budget-4 --title "Fourth call" --reason "spend: buy it" \
+    --kind design --repo sample > "$home/contradiction.out" 2> "$home/contradiction.err"; then
+    fail "hold accepted a kind that contradicts the reason's tag"
+  fi
+  assert_grep "contradicts the reason's leading spend: tag" "$home/contradiction.err" \
+    "the contradiction refusal did not name the tag"
+  tasks_in "$home" add sample-budget-work "Ordinary work" --repo sample >/dev/null \
+    || fail "could not create ordinary work"
+  if run_captain_budgeted "$home" hold sample-budget-work --reason "pick for the work" \
+    > "$home/work.out" 2> "$home/work.err"; then
+    fail "holding an existing work item bypassed the budget"
+  fi
+  assert_contains "$(tasks_in "$home" show sample-budget-work --full)" "held: no" \
+    "a refused hold still held the work item"
+  run_captain_budgeted "$home" hold sample-budget-sec --title "Security call" \
+    --reason "security: rotate the key" --repo sample >/dev/null \
+    || fail "a security-tagged call was refused"
+  assert_contains "$(tasks_in "$home" show sample-budget-sec --full)" "Captain hold kind: security" \
+    "the tag did not supply the kind"
+  run_captain_budgeted "$home" hold sample-budget-1 --reason "pick for sample-budget-1 again" >/dev/null \
+    || fail "a repeat hold of an open call was refused"
+  run_captain_budgeted "$home" hold sample-other-1 --title "Other repo call" --reason "pick" \
+    --repo other >/dev/null || fail "another repo's call was refused"
+  run_captain_budgeted "$home" hold sample-budget-2 --reason "later" --until 2099-01-01 >/dev/null \
+    || fail "the captain's deferral of an open call was refused"
+  if run_captain_budgeted "$home" hold sample-budget-4 --title "Fourth call" --reason "pick again" \
+    --repo sample > "$home/still.out" 2> "$home/still.err"; then
+    fail "a tagged call did not count toward the budget"
+  fi
+  assert_not_contains "$(cat "$home/still.err")" "sample-budget-2" "a deferred call counted toward the budget"
+  printf 'Take the first option.\n' > "$home/answer.txt"
+  run_captain_budgeted "$home" answer sample-budget-1 --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not answer a call"
+  run_captain_budgeted "$home" hold sample-budget-4 --title "Fourth call" --reason "pick again" \
+    --repo sample >/dev/null || fail "an answered call did not free budget"
+  pass "the call budget refuses a fourth untagged call per repo and lets exempt, repeat, deferred, and answered paths through"
+}
+
+# Kinds, recommendations, outcomes, the tally line, and the aging card.
+test_kinds_outcomes_tally_and_aging() {
+  local home show out before
+  home=$(make_home call-tally)
+  out=$(run_captain "$home" tally) || fail "tally failed on an empty home"
+  assert_equals "captain calls (all time): none" "$out" "an empty home did not tally as none"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z run_captain "$home" hold sample-tally-design \
+    --title "Design call" --reason "design: pick a layout" --recommend "take layout a" --repo sample >/dev/null \
+    || fail "could not hold the design call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-10T00:00:00Z run_captain "$home" hold sample-tally-spend \
+    --title "Spend call" --reason "spend: buy seats" --kind spend --repo sample >/dev/null \
+    || fail "could not hold the spend call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T11:00:00Z run_captain "$home" hold sample-tally-fresh \
+    --title "Fresh call" --reason "pick one" --repo sample >/dev/null \
+    || fail "could not hold the fresh call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z run_captain "$home" hold sample-tally-later \
+    --title "Deferred call" --reason "polish later" --kind cosmetic --until 2099-01-01 --repo sample >/dev/null \
+    || fail "could not hold the deferred call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z run_captain "$home" hold sample-tally-quiet \
+    --title "Quiet call" --reason "pick quietly" --repo sample >/dev/null \
+    || fail "could not hold the quiet call"
+  show=$(tasks_in "$home" show sample-tally-design --full)
+  assert_contains "$show" "Captain hold kind: design" "the reason tag did not record the kind"
+  assert_contains "$show" "Captain hold recommendation: take layout a" "the recommendation was not recorded"
+  assert_contains "$(tasks_in "$home" show sample-tally-fresh --full)" "Captain hold kind: other" \
+    "an untagged call did not default to other"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z run_captain "$home" hold sample-tally-design \
+    --reason "design: pick a layout soon" >/dev/null || fail "could not repeat the design hold"
+  show=$(tasks_in "$home" show sample-tally-design --full)
+  assert_contains "$show" "Captain hold kind: design" "a repeat hold lost the kind"
+  assert_contains "$show" "Captain hold recommendation: take layout a" "a repeat hold lost the recommendation"
+
+  before=$(cat "$home/data/backlog.md")
+  out=$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" aging) || fail "aging failed"
+  assert_equals "settle these 2 by recommendation?
+- sample-tally-design [sample, design, 13 days] Design call: design: pick a layout soon; recommended: take layout a
+- sample-tally-quiet [sample, other, 13 days] Quiet call: pick quietly; no recommendation recorded" "$out" \
+    "aging did not batch the week-old calls into one card"
+  out=$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" aging --days 0) || fail "aging --days 0 failed"
+  assert_contains "$out" "settle these 4 by recommendation?" "aging --days 0 did not list every live call"
+  assert_not_contains "$out" "sample-tally-later" "aging listed a call the captain deferred"
+  out=$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" aging --days 30) || fail "aging --days 30 failed"
+  assert_equals "no open captain calls 30 or more days old" "$out" "aging did not say when nothing is old enough"
+  assert_equals "$before" "$(cat "$home/data/backlog.md")" "aging changed the backlog"
+
+  printf 'Take layout a.\n' > "$home/design.txt"
+  printf 'Buy fewer seats.\n' > "$home/spend.txt"
+  printf 'Fine.\n' > "$home/quiet.txt"
+  if run_captain "$home" answer sample-tally-design --decision-file "$home/design.txt" --outcome maybe \
+    > "$home/bad-outcome.out" 2> "$home/bad-outcome.err"; then
+    fail "answer accepted an unknown outcome"
+  fi
+  assert_contains "$(tasks_in "$home" show sample-tally-design --full)" "held: yes" \
+    "a refused outcome still closed the call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" answer sample-tally-design \
+    --decision-file "$home/design.txt" --outcome recommended >/dev/null || fail "could not answer the design call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" answer sample-tally-spend \
+    --decision-file "$home/spend.txt" --outcome different --release >/dev/null || fail "could not release the spend call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" answer sample-tally-quiet \
+    --decision-file "$home/quiet.txt" >/dev/null || fail "could not answer the quiet call"
+  show=$(tasks_in "$home" show sample-tally-design --full)
+  assert_contains "$show" "Call kind: design" "the resolution block lost the kind"
+  assert_contains "$show" "Call outcome: recommended" "the resolution block lost the outcome"
+  assert_contains "$show" "Call resolved: 2026-07-14T12:00:00Z" "the resolution block lost when it was resolved"
+
+  out=$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" tally) || fail "tally failed"
+  assert_equals "captain calls (all time): 5 - spend 1 (different 1); design 1 (recommended 1); cosmetic 1 (open 1); other 2 (open 1, unrecorded 1)" \
+    "$out" "tally did not count calls by kind and ending"
+  out=$(FM_CAPTAIN_HOLD_NOW=2026-08-30T12:00:00Z run_captain "$home" tally --days 7) || fail "tally --days failed"
+  assert_equals "captain calls (last 7 days): 2 - cosmetic 1 (open 1); other 1 (open 1)" \
+    "$out" "tally --days did not drop calls resolved before the window"
+  if run_captain "$home" tally --days soon > "$home/bad-days.out" 2> "$home/bad-days.err"; then
+    fail "tally accepted a non-numeric window"
+  fi
+  pass "kinds and recommendations are recorded, aging batches week-old calls read-only, and tally counts how each kind ends"
+}
+
+test_call_budget_refuses_a_fourth_untagged_call
+test_kinds_outcomes_tally_and_aging
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair

@@ -43,6 +43,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | `reconcile close`, `reconcile note`, `reconcile list` | Retire or list pending reconcile requests. | [Verifying and retiring a request](#verifying-and-retiring-a-request) |
 | `diverged` | Read-only report of a call whose two records disagree. | [Record divergence](#record-divergence) |
+| `tally`, `aging` | Read-only counts of calls by kind and ending, and one card of calls open seven days or more. | [Budget, kinds, and aging](#budget-kinds-and-aging) |
 
 ### Creating a hold (`hold`)
 
@@ -65,8 +66,20 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.
+- A new call is refused while its repo already has three open calls in the home, unless its reason carries a budget-exempt tag; see [Budget, kinds, and aging](#budget-kinds-and-aging).
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+
+### Budget, kinds, and aging
+
+The captain's standing rule is at most three open captain calls per project, so `hold` counts the open calls its repo already has before it creates or holds anything.
+The count reads the configured backlog once, skips calls deferred by a future `--until` date, and never counts a repeat hold of an open call as a new one.
+Nothing in the budget closes, rewrites, or migrates a call that is already open.
+Each lifecycle records its kind on a `Captain hold kind:` body line and an optional `Captain hold recommendation:` line beside the origin line, below the leading hold-set stamp, so the stamp stays the first line every snapshot reads.
+Each new resolution block adds `Call kind:`, an optional `Call outcome:`, and a `Call resolved:` timestamp beneath its `Resolution mode:` line, which is how `tally` counts the way each kind of call ends without a second record.
+`tally` and `aging` only read; `aging` never answers, and a settled card is recorded one call at a time through `answer --outcome recommended`.
+Both read only what the configured backlog still lists, so a Done row an archive has rotated out drops from the tally.
+`bin/fm-captain-hold.sh --help` owns the tags, kinds, outcomes, defaults, and output shapes.
 
 ### Answering a call (`answer`)
 
@@ -534,6 +547,12 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+
+### Budget, kinds, and aging coverage
+
+- A fourth untagged call for one repo is refused before any row is minted or changed, naming the open calls and the exempt tags; an explicit kind without the tag, or one contradicting it, does not get past it.
+- A budget-exempt tag, a repeat hold of an open call, another repo, a call deferred by `--until`, and an answered call each let the next hold through.
+- Kinds and recommendations survive a repeat hold, `aging` batches only live calls at least the window old into one card without changing the backlog, and `tally` counts each kind by how it ended, including an answer that recorded no outcome and a window that drops older resolutions.
 
 ### Legacy paths
 
