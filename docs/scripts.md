@@ -10,6 +10,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-sessionstart-run.sh` | Route a native session-open hook to the full digest, a context re-emit, or the nudge |
+| `fm-context-restart.sh` | Save and restart an opted-in Claude primary through `/clear` once its context passes `config/context-restart` |
+| `fm-usage-by-home.sh`    | Report which home and task used each Claude account, from session transcripts and spawn attribution records |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-startup-network.sh`  | Run session start's network checks and inactive-outcome scan off its blocking path, retaining reports and durable findings |

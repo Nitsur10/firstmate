@@ -91,6 +91,8 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Per-launch usage attribution records in `state/usage-attribution.tsv` (`bin/fm-usage-by-home.sh`).
+- Context-restart records under `state/context-restart/` (`bin/fm-context-restart.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -701,6 +703,29 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
+
+## Context restart (config/context-restart)
+
+`config/context-restart` is an optional local, gitignored file that makes the main home's primary Claude session save and restart itself once its context reaches a threshold, instead of relying on someone remembering to start a fresh session.
+Without it nothing changes: the tracked Stop and SessionStart hooks that serve it each cost one file test and exit.
+
+The file's first line that is not blank and not a `#` comment is the threshold in tokens, written as an integer or with a `k` suffix, such as `200000` or `200k`.
+An empty file uses `200000`.
+A value below `50000` is refused, because a fresh session that has just read its startup digest already sits near that size; a refused or malformed value leaves the feature inert, and `bin/fm-context-restart.sh status` names the problem.
+A conversation whose first measured context is already high is restarted only after it grows by half the threshold beyond that starting point, so a restarted session never restarts again straight away.
+
+### What happens at the threshold
+
+After a turn that ends at or above the threshold, the session is told once to finish the wake it is handling, run the stow pass, and run `bin/fm-context-restart.sh restart --stowed`.
+That command types `/clear` into the session's own pane when the turn has ended and the composer is empty, then submits one restart notice so the cleared conversation starts work from the re-emitted session-start digest, including any queued wakes.
+`/clear` keeps the same Claude process, so the session lock, Remote Control, the way the captain launched the session, the supervision watcher, and an away or quiet posture all carry over; queued wakes are never acknowledged by the restart.
+
+The restart needs the primary to run inside a tmux, Herdr, or cmux pane, because that is how it types `/clear`.
+If a wake or a captain message starts another turn before the clear, the restart is called off and offered again, so the stow pass is repeated first.
+In a plain terminal tab it refuses and the session asks the captain to type `/clear`; a failed restart is likewise reported once so the captain hears about it.
+Only the main home's lock-owning Claude primary is in scope: second mate homes, task worktrees, the supervision host, and other harnesses never restart this way, and the file is not inherited by second mate homes.
+
+The script's header owns the hook protocol, records under `state/context-restart/`, and timing knobs.
 
 ## Secondmate routes (data/secondmates.md)
 

@@ -235,7 +235,8 @@ Each subsection below gives one harness surface's tier, its tracked transport, a
 ### Claude
 
 Claude is a run-tier harness.
-`.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout.
+`.claude/settings.json` registers one unmatched session-start `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout.
+A second `SessionStart` entry only records a `/clear` that the opt-in context restart requested ([`configuration.md`](configuration.md#context-restart-configcontext-restart)) and prints nothing.
 The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
 
