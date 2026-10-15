@@ -21,8 +21,12 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--kind <kind>] [--recommend <recommendation>]
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] \
+#     [--outcome recommended|different|deferred]
+#   fm-captain-hold.sh tally [--days N]
+#   fm-captain-hold.sh aging [--days N]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -56,6 +60,64 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# CALL BUDGET, KINDS, AND OUTCOMES.
+# A new captain call - a task that is not already an open captain call - is
+# refused while its repo already has three open captain calls in this home,
+# unless the reason starts with one of the budget-exempt tags `spend:`,
+# `production:`, `compliance:`, `security:`, or `irreversible:`. The refusal
+# names the open calls it counted and those tags. A call whose `--until` date is
+# still in the future is the captain's own deferral, so it does not count; a
+# repeat hold of an open call is never refused, and nothing here closes or
+# rewrites an existing hold. The kinds are spend, production, compliance,
+# security, irreversible, design, cosmetic, and other. `--kind` names one; without
+# it a leading `<kind>:` tag in the reason supplies it, a repeat hold keeps the
+# kind already recorded, and anything else is `other`; an explicit kind that
+# contradicts the reason's tag is refused. The kind is recorded on a
+# `Captain hold kind:` body line beside the origin line, and `--recommend`
+# records one `Captain hold recommendation:` line the same way. A new lifecycle
+# starts its own annotation block, while a repeat hold keeps a recorded
+# recommendation unless `--recommend` replaces it. The annotation block is only
+# the run of those lines directly beneath the hold-set stamp; the same prefixes
+# anywhere else in the body, such as inside a recorded answer, are left as text.
+# `answer --outcome` records whether the captain took the recommendation
+# (`recommended`), chose otherwise (`different`), or put it off (`deferred`).
+# A replay of a recorded answer may omit `--outcome`; one it names must match
+# the outcome already recorded, so a changed outcome is refused, while one the
+# record never had is added to the newest record's header.
+# Kinds, tags, and outcomes match exactly, so a multiword value such as
+# `spend production` is none of them. Holding a call deferred to a future date
+# again without a future `--until` counts it again, so the budget applies.
+# The budget is the captain's standing rule of three, fixed here so no caller
+# environment can lift it.
+# Every resolution block written from now on carries `Call kind:`,
+# `Call origin:`, an optional `Call outcome:`, and a `Call resolved:` UTC
+# timestamp beneath its `Resolution mode:` line; FM_CAPTAIN_HOLD_NOW pins that
+# timestamp as it pins the hold-set stamp. The origin line is always written,
+# as `(none)` when the call had none, and marks that format, so
+# body_hold_origin below reads each format only from its own script-owned
+# place and text inside a recorded answer never supplies it. While an answer's
+# close is pending, the call's annotation block stays beneath the hold-set
+# stamp, and the post-close normalization moves it back below the record.
+# `tally` is read-only and prints one line counting this home's captain calls
+# by kind and by how each ended: still open, the three outcomes, `reconciled`
+# for an evidence-backed moot close, and `unrecorded` for an answer that named
+# no outcome, including every record written before outcomes existed, whose
+# kind also reads as `other`. `--days N` limits resolved calls to those
+# resolved within the last N days, so an undated older record drops out; open
+# calls always count. It reads only what the configured backlog still lists, so
+# a row an archive has rotated out is not counted.
+# `aging` is read-only and prints open captain calls whose hold-set stamp (or,
+# without one, the task's created date) is at least N days old, default 7, as
+# one card headed `settle these <n> by recommendation?` with one line per call
+# naming its repo, kind, age, title, reason, and recorded recommendation. A
+# deferred call whose `--until` date is still ahead is left out. It never
+# answers or releases anything; `answer --outcome recommended` per call is how
+# a yes is recorded.
+# Both read bodies through the backlog listing, which truncates each body at
+# about 500 characters, so an older resolution record can drop out of `tally`
+# and a long recommendation can be clipped on the `aging` card; the budget count
+# and the open-call rows are unaffected.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -330,6 +392,62 @@ BINDING_ANY='(any)'
 DECISION_TEXT=''
 DECISION_DIGEST=''
 
+# The call budget, kinds, and outcomes (see "CALL BUDGET" in the header).
+CALL_BUDGET=3
+CALL_KINDS='spend production compliance security irreversible design cosmetic other'
+CALL_BUDGET_EXEMPT='spend production compliance security irreversible'
+CALL_OUTCOMES='recommended different deferred'
+CALL_KIND=other
+CALL_OUTCOME=''
+CALL_RESOLVED=''
+CALL_ORIGIN=''
+
+# Exact membership of one single-word value; anything carrying whitespace is
+# never a member, so a value such as `spend production` matches nothing.
+word_in_list() {  # <word> <space-separated-list>
+  case "$1" in
+    ''|*[[:space:]]*) return 1 ;;
+  esac
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# The kind a reason's leading `<kind>:` tag names, if it names one.
+reason_kind_tag() {  # <reason>
+  local tag
+  case "$1" in
+    *:*) tag=${1%%:*} ;;
+    *) return 1 ;;
+  esac
+  word_in_list "$tag" "$CALL_KINDS" || return 1
+  printf '%s' "$tag"
+}
+
+# Whether a YYYY-MM-DD date is after today (UTC, or FM_CAPTAIN_HOLD_NOW's day).
+date_is_future() {  # <date-or-empty>
+  local today
+  case "${1:-}" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+    *) return 1 ;;
+  esac
+  today=$(captain_now) || exit $?
+  today=${today%%T*}
+  [[ "$1" > "$today" ]]
+}
+
+# The current UTC time for every stamp this script writes; FM_CAPTAIN_HOLD_NOW
+# pins it for tests.
+captain_now() {
+  local now=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+  case "$now" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) : ;;
+    *) fail "FM_CAPTAIN_HOLD_NOW must be a UTC YYYY-MM-DDTHH:MM:SSZ timestamp" ;;
+  esac
+  printf '%s' "$now"
+}
+
 load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   local path=$1 decision
   [ -n "$path" ] || fail "--decision-file is required"
@@ -504,6 +622,38 @@ recorded_resolution_mode() {  # <task-body>
   printf '%s' "$rest"
 }
 
+# The newest resolution record's `Call outcome:`, empty when it named none.
+recorded_call_outcome() {  # <shown-task-body>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" | awk '
+    !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; next }
+    seen && /^$/ { exit }
+    seen && /^Call outcome: / { sub(/^Call outcome: /, ""); print; exit }
+  '
+}
+
+# A replay of a recorded answer may omit --outcome. One it names must match the
+# outcome already recorded; when the record holds none, the replay adds it to the
+# newest record's header and changes nothing else in the body.
+reconcile_replay_outcome() {  # <task-id> <shown-task-body>
+  local id=$1 recorded body
+  [ -n "$CALL_OUTCOME" ] || return 0
+  recorded=$(recorded_call_outcome "$2") || fail "could not read the recorded outcome for $id"
+  if [ -n "$recorded" ]; then
+    [ "$recorded" = "$CALL_OUTCOME" ] \
+      || fail "task $id records $recorded outcome for this answer; a replay cannot record $CALL_OUTCOME"
+    return 0
+  fi
+  body=$(decode_shown_value "$2") || fail "could not decode the body for $id"
+  body=$(printf '%s\n' "$body" | awk -v outcome="$CALL_OUTCOME" '
+    !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; inhead = 1; print; next }
+    inhead && (/^$/ || /^Call resolved: /) { print "Call outcome: " outcome; inhead = 0 }
+    { print }
+  ')
+  write_task_body "$id" "$body" "replayed call outcome"
+}
+
 closed_answer_replay_mode_compatible() {  # <mode> <task-body>
   case "$1" in
     answered|repaired|routed) return 0 ;;
@@ -514,11 +664,18 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
 # and carries verified evidence; every other mode carries what the captain said.
+# The call's kind, its origin when it had one, its optional outcome, and when it
+# was resolved sit beneath the mode: `tally` counts how each kind ends from
+# them, and `complete` reads a closed call's origin from them.
 resolution_block() {  # <mode>
-  local label='Captain decision:'
+  local label='Captain decision:' call
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  call=$(printf 'Call kind: %s' "$CALL_KIND")
+  call=$(printf '%s\nCall origin: %s' "$call" "${CALL_ORIGIN:-(none)}")
+  [ -z "$CALL_OUTCOME" ] || call=$(printf '%s\nCall outcome: %s' "$call" "$CALL_OUTCOME")
+  call=$(printf '%s\nCall resolved: %s' "$call" "$CALL_RESOLVED")
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n%s\n\n%s\n%s\n' \
+    "$DECISION_DIGEST" "$1" "$call" "$label" "$DECISION_TEXT"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -803,10 +960,39 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   rm -f -- "$tmp"
 }
 
-# The origin a hold was recorded for lives in the held task's own body, on a
-# line of its own, so `complete` can tell a call held for this origin from one
-# held for another. Omitting --origin leaves any existing association intact.
+# The origin a hold was recorded for, so `complete` can tell a call held for
+# this origin from one held for another. Each format is read from the one
+# script-owned place it has always used, and nowhere else:
+# - a live hold's origin line in its annotation block beneath the hold-set
+#   stamp, where every version of this script has written it;
+# - otherwise, a resolution record written by this version, which always states
+#   `Call origin:` in its header (`(none)` when the call had none; parentheses
+#   are never part of a task id), so that line marks the format explicitly;
+# - otherwise, every record and body written before that line existed resolves
+#   exactly as it always did: the first `Captain hold origin:` line in the body.
+# Text inside a record's answer is never read for a record that states its
+# origin, so origin-shaped answer text cannot reassociate the call.
 body_hold_origin() {  # <decoded-task-body>
+  local origin
+  if [ -n "$(body_hold_set_timestamp "$1")" ]; then
+    origin=$(body_hold_block_origin "$1")
+    if [ -n "$origin" ]; then
+      printf '%s' "$origin"
+      return 0
+    fi
+  fi
+  if origin=$(printf '%s\n' "$1" | awk '
+    done { next }
+    !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; next }
+    !seen { next }
+    /^$/ { done = 1; next }
+    /^Call origin: / { sub(/^Call origin: /, ""); origin = $0; stated = 1 }
+    END { if (stated) { printf "%s", origin; exit 0 } exit 3 }
+  '); then
+    [ "$origin" != '(none)' ] || origin=''
+    printf '%s' "$origin"
+    return 0
+  fi
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
@@ -821,33 +1007,85 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
-  local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+# The current lifecycle's annotation block is the run of `Captain hold kind:`,
+# `Captain hold recommendation:`, and `Captain hold origin:` lines directly
+# beneath the leading hold-set stamp, and nothing else: the same prefixes
+# anywhere further down - in the task's own prose or inside an earlier recorded
+# answer - belong to that text and are never read or rewritten as metadata.
+hold_annotation_block() {  # <decoded-task-body>
+  printf '%s\n' "$1" | awk '
+    NR == 1 { next }
+    /^Captain hold (kind|recommendation|origin): / { print; next }
+    { exit }
+  '
+}
+
+# The text beneath the stamp and the annotation block, byte for byte.
+hold_annotation_rest() {  # <decoded-task-body>
+  printf '%s\n' "$1" | awk '
+    NR == 1 { next }
+    !past && /^Captain hold (kind|recommendation|origin): / { next }
+    { past = 1; print }
+  '
+}
+
+# The kind and recommendation the current lifecycle recorded. A lifecycle that
+# records no kind is an `other` call.
+body_hold_kind() {  # <decoded-task-body>
+  local kind
+  kind=$(hold_annotation_block "$1" | sed -n 's/^Captain hold kind: \(.*\)$/\1/p' | head -1)
+  word_in_list "$kind" "$CALL_KINDS" || kind=other
+  printf '%s' "$kind"
+}
+
+body_hold_recommendation() {  # <decoded-task-body>
+  hold_annotation_block "$1" | sed -n 's/^Captain hold recommendation: \(.*\)$/\1/p' | head -1
+}
+
+body_hold_block_origin() {  # <decoded-task-body>
+  hold_annotation_block "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
+}
+
+write_task_body() {  # <task-id> <decoded-body> <what>
+  local id=$1 body=$2 what=$3 tmp
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
+    || fail "cannot stage the $what"
+  if ! printf '%s\n' "$body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the $what for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the $what on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
+# Replace only the current annotation block beneath the hold-set stamp with
+# kind, then any recommendation, then any origin; everything after the block is
+# kept byte for byte. An unchanged body is not rewritten.
+write_hold_annotations() {  # <task-id> <shown-body> <kind> <recommendation-or-empty> <origin-or-empty>
+  local id=$1 body=$2 kind=$3 recommendation=$4 origin=$5 stamp rest new_body
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
   [ -n "$(body_hold_set_timestamp "$body")" ] \
-    || fail "task $id lost its hold-set stamp before its origin was recorded"
-  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
-    | awk 'NF || started { started = 1; print }')
-  new_body=$stamp
+    || fail "task $id lost its hold-set stamp before its hold was annotated"
+  rest=$(hold_annotation_rest "$body")
+  new_body=$(printf '%s\nCaptain hold kind: %s' "$stamp" "$kind")
+  if [ -n "$recommendation" ]; then
+    new_body=$(printf '%s\nCaptain hold recommendation: %s' "$new_body" "$recommendation")
+  fi
   if [ -n "$origin" ]; then
-    new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+    new_body=$(printf '%s\nCaptain hold origin: %s' "$new_body" "$origin")
   fi
-  if [ -n "$rest" ]; then
-    new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
-  fi
-  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-origin.XXXXXX") \
-    || fail "cannot stage the hold origin"
-  if ! printf '%s\n' "$new_body" > "$tmp"; then
-    rm -f -- "$tmp"
-    fail "cannot stage the hold origin for $id"
-  fi
-  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
-    rm -f -- "$tmp"
-    fail "could not record the hold origin on $id"
-  fi
-  rm -f -- "$tmp"
+  case "$rest" in
+    '') ;;
+    $'\n'*) new_body=$(printf '%s\n%s' "$new_body" "$rest") ;;
+    *) new_body=$(printf '%s\n\n%s' "$new_body" "$rest") ;;
+  esac
+  [ "$new_body" != "$body" ] || return 0
+  write_task_body "$id" "$new_body" "hold annotations"
 }
 
 refuse_self_inventory() {
@@ -900,9 +1138,30 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
 
+# Refuse a NEW captain call while its repo already has the budgeted number of
+# open calls, unless the reason carries a budget-exempt tag.
+enforce_call_budget() {  # <task-id> <repo> <reason>
+  local id=$1 repo=$2 reason=$3 tag open count listed tags='' kind
+  tag=$(reason_kind_tag "$reason" || true)
+  if [ -n "$tag" ] && word_in_list "$tag" "$CALL_BUDGET_EXEMPT"; then
+    return 0
+  fi
+  open=$(captain_calls_scan) || fail "cannot count the open captain calls for repo $repo; refusing to add another"
+  open=$(printf '%s\n' "$open" | awk -F'\t' -v repo="$repo" -v id="$id" '
+    $1 == "open" && $3 == repo && $2 != id && $9 != "deferred" { print $2 }')
+  count=$(printf '%s\n' "$open" | sed '/^$/d' | wc -l | tr -d ' ')
+  [ "$count" -ge "$CALL_BUDGET" ] || return 0
+  listed=$(printf '%s\n' "$open" | sed '/^$/d' | paste -sd, - | sed 's/,/, /g')
+  for kind in $CALL_BUDGET_EXEMPT; do
+    tags="${tags:+$tags, }$kind:"
+  done
+  fail "repo $repo already has $count open captain calls ($listed), and the budget is $CALL_BUDGET; settle or defer one first, or start the reason with one of $tags when this call genuinely is one"
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason hold_status=0
+  local kind='' recommendation='' recommend_given=0 tag existing_open=0 existing_until decoded annotated_from
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -912,6 +1171,8 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --kind) shift; kind=${1:-} ;;
+      --recommend) shift; recommendation=${1:-}; recommend_given=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -929,11 +1190,16 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
-  hold_set=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-  case "$hold_set" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) : ;;
-    *) fail "FM_CAPTAIN_HOLD_NOW must be a UTC YYYY-MM-DDTHH:MM:SSZ timestamp" ;;
-  esac
+  if [ -n "$kind" ]; then
+    word_in_list "$kind" "$CALL_KINDS" || fail "--kind must be one of: $CALL_KINDS"
+  fi
+  tag=$(reason_kind_tag "$reason" || true)
+  if [ -n "$kind" ] && [ -n "$tag" ] && [ "$kind" != "$tag" ]; then
+    fail "--kind $kind contradicts the reason's leading $tag: tag"
+  fi
+  [ -n "$kind" ] || kind=$tag
+  [ "$recommend_given" = 0 ] || validate_one_line recommendation "$recommendation"
+  hold_set=$(captain_now) || exit $?
   acquire_task_control_lock "$id"
   require_tasks_axi
   if task_show "$id"; then
@@ -946,10 +1212,23 @@ command_hold() {
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
+    # An open captain call (even one whose date gate has expired) is already
+    # counted against the budget, so holding it again adds no call - except
+    # that a call deferred to a future date is not counted, so holding it again
+    # without a future date moves it back into the counted set.
+    if [ "$existing_hold_kind" = captain ]; then
+      existing_open=1
+      existing_until=$(show_field_value "$show" hold_until)
+      if date_is_future "$existing_until" && ! date_is_future "$until"; then
+        existing_open=0
+      fi
+    fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
+    [ "$existing_open" = 1 ] \
+      || enforce_call_budget "$id" "$(show_field_value "$show" repo)" "$reason"
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
@@ -960,6 +1239,7 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
+    enforce_call_budget "$id" "$repo" "$reason"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     # tasks-axi add never passes --due. Beads due.required would refuse this
     # create, and captain holds have no due semantics, so waive it for this
@@ -978,13 +1258,28 @@ command_hold() {
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
   write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+  decoded=$(show_field_value "$show" body)
+  [ -n "$(body_hold_set_timestamp "$decoded")" ] \
     || fail "task $id did not retain its hold-set stamp"
+  # A repeat of an active hold keeps what this lifecycle already recorded; a new
+  # lifecycle starts from the flags alone. Omitting --origin keeps the origin.
+  if [ -z "$kind" ]; then
+    kind=other
+    [ "$preserve_hold_set" = 0 ] || kind=$(body_hold_kind "$decoded")
+  fi
+  if [ "$recommend_given" = 0 ] && [ "$preserve_hold_set" = 1 ]; then
+    recommendation=$(body_hold_recommendation "$decoded")
+  fi
   if [ -n "$origin" ]; then
     origin=$(task_identity "$origin") || exit $?
-    previous_origin=$(body_hold_origin "$(show_field_value "$show" body)")
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  else
+    # Only a repeat of a live hold keeps an origin in the block; a new
+    # lifecycle without --origin leaves the association to the record that
+    # holds it, as every earlier version did.
+    origin=$(body_hold_block_origin "$decoded")
   fi
+  annotated_from=$decoded
+  write_hold_annotations "$id" "$(show_field "$show" body)" "$kind" "$recommendation" "$origin" || exit $?
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
       || hold_status=$?
@@ -994,9 +1289,11 @@ command_hold() {
   fi
   if [ "$hold_status" -ne 0 ]; then
     # A refused re-hold must not associate the previous hold or answer with a
-    # new origin. Restore the old line verbatim, without resolving it again.
-    if [ -n "$origin" ]; then
-      write_hold_origin "$id" "$(show_field "$show" body)" "$previous_origin" || exit $?
+    # new origin, kind, or recommendation. Restore the old lines verbatim,
+    # without resolving them again.
+    task_show_or_fail "$id" "task $id disappeared after its hold was refused"
+    if [ "$(show_field_value "$show" body)" != "$annotated_from" ]; then
+      write_task_body "$id" "$annotated_from" "previous hold annotations" || exit $?
     fi
     fail "could not hold task $id for the captain"
   fi
@@ -1015,25 +1312,38 @@ command_hold() {
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
-  new_body=$(resolution_block "$mode")
+  local id=$1 mode=$2 body=$3 new_body hold_set block rest
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
+  CALL_KIND=$(body_hold_kind "$body")
+  CALL_ORIGIN=$(body_hold_origin "$body")
+  CALL_RESOLVED=$(captain_now) || exit $?
+  new_body=$(resolution_block "$mode")
   hold_set=$(body_hold_set_timestamp "$body")
   if [ -n "$hold_set" ]; then
-    body=${body#"Captain hold set: $hold_set"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    # While the close is pending the call is still live, so its annotation
+    # block stays beneath the stamp where every reader looks for it; the
+    # post-close normalization moves it below the record.
+    block=$(hold_annotation_block "$body")
+    rest=$(hold_annotation_rest "$body" | awk 'NF || started { started = 1; print }')
+    if [ -n "$block" ]; then
+      new_body=$(printf 'Captain hold set: %s\n%s\n\n%s' "$hold_set" "$block" "$new_body")
+    else
+      new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    fi
+    body=$rest
   fi
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
+  write_body_archived "$id" "$new_body"
+}
+
+write_body_archived() {  # <task-id> <decoded-body>
+  local id=$1 tmp
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
     || fail "cannot stage the resolution record"
-  if ! printf '%s\n' "$new_body" > "$tmp"; then
+  if ! printf '%s\n' "$2" > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot stage the resolution record for $id"
   fi
@@ -1082,17 +1392,37 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
-  local id=$1 show body existing tmp
+  local id=$1 show body existing block after record lines rest tmp
   task_show_or_fail "$id" "task $id disappeared after closing"
   body=$(decode_shown_value "$(show_field "$show" body)") \
     || fail "could not decode the closed body for $id"
   existing=$(body_hold_set_timestamp "$body")
   [ -n "$existing" ] || return 0
-  body=${body#"Captain hold set: $existing"}
-  case "$body" in
-    $'\n\n'*) body=${body#$'\n\n'} ;;
-    $'\n'*) body=${body#$'\n'} ;;
-  esac
+  block=$(hold_annotation_block "$body")
+  after=$(hold_annotation_rest "$body" | awk 'NF || started { started = 1; print }')
+  body=$after
+  if [ -n "$block" ]; then
+    # The closed call's annotation block goes back beneath its record, which is
+    # the header through its blank line, the label, and this decision's lines.
+    lines=$(printf '%s\n' "$DECISION_TEXT" | wc -l | tr -d ' ')
+    record=$(printf '%s\n' "$after" | awk -v n="$lines" '
+      NR == 1 && !/^Resolution recorded by fm-captain-hold\.$/ { exit 1 }
+      !blank { print; if ($0 == "") blank = 1; next }
+      !label { print; label = 1; next }
+      count < n { print; count++; next }
+      { exit }
+    ') || record=''
+    if [ -n "$record" ] && [ "$(printf '%s\n' "$record" | tail -n "$lines")" = "$DECISION_TEXT" ]; then
+      lines=$(printf '%s\n' "$record" | wc -l | tr -d ' ')
+      rest=$(printf '%s\n' "$after" | awk -v n="$lines" 'NR > n' | awk 'NF || started { started = 1; print }')
+      body=$(printf '%s\n\n%s' "$record" "$block")
+      [ -z "$rest" ] || body=$(printf '%s\n\n%s' "$body" "$rest")
+    else
+      # A record this decision did not write keeps the block above it rather
+      # than guessing where the record ends.
+      body=$(printf '%s\n\n%s' "$block" "$after")
+    fi
+  fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
   if ! printf '%s\n' "$body" > "$tmp" \
@@ -1111,11 +1441,15 @@ command_answer() {
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --release) release=1 ;;
+      --outcome) shift; CALL_OUTCOME=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
+  if [ -n "$CALL_OUTCOME" ]; then
+    word_in_list "$CALL_OUTCOME" "$CALL_OUTCOMES" || fail "--outcome must be one of: $CALL_OUTCOMES"
+  fi
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
   require_tasks_axi
@@ -1139,6 +1473,7 @@ command_answer() {
         || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      reconcile_replay_outcome "$id" "$body"
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
         publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
@@ -1181,6 +1516,7 @@ command_answer() {
         answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
+      reconcile_replay_outcome "$id" "$body"
       if ! close_answered "$id" "$release"; then
         fail "could not close answered captain-held task $id"
       fi
@@ -1210,6 +1546,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    reconcile_replay_outcome "$id" "$body"
     remove_interrupted_answer_stamp "$id"
     publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"
@@ -1899,6 +2236,155 @@ open_task_ids() {
   '
 }
 
+# One read of this home's backlog summarizing every captain call it lists, one
+# TAB-separated line each, for the budget, `tally`, and `aging`:
+#   open <id> <repo> <kind> <age-days> <hold-set> <recommendation> <title> <live|deferred> <reason>
+#   record <id> <repo> <kind> <outcome> <resolved-age-days>
+# An open call is a row not Done whose hold kind is captain; its age comes from
+# the hold-set stamp, else the created date, and is -1 when neither parses. A
+# record is one resolution block in any row's body; a record with no
+# `Call resolved:` line has age -1, and one with no outcome is `reconciled`
+# when its mode is, `unrecorded` otherwise. Free text is flattened to one line.
+captain_calls_scan() {
+  local data now listing
+  now=$(captain_now) || return 1
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_until,hold_reason,created,body) || return 1
+  printf '%s\n' "$listing" | fm_hold_reason_decode_stream toon | CAPTAIN_NOW=$now perl -MJSON::PP -MTime::Local=timegm -e '
+    use strict;
+    use warnings;
+    binmode STDIN, ":encoding(UTF-8)";
+    binmode STDOUT, ":encoding(UTF-8)";
+    my $json = JSON::PP->new->allow_nonref;
+    my ($now_day, $now) = $ENV{CAPTAIN_NOW} =~ /^((\d{4})-(\d\d)-(\d\d))T(\d\d):(\d\d):(\d\d)Z$/
+      ? ($1, timegm($7, $6, $5, $4, $3 - 1, $2)) : die "bad now\n";
+    sub age {
+      my ($stamp) = @_;
+      return -1 unless defined($stamp)
+        && $stamp =~ /^(\d{4})-(\d\d)-(\d\d)(?:T(\d\d):(\d\d):(\d\d)Z)?$/;
+      my $t = eval { timegm($6 // 0, $5 // 0, $4 // 0, $3, $2 - 1, $1) };
+      return defined($t) ? int(($now - $t) / 86400) : -1;
+    }
+    sub flat { my ($v) = @_; $v //= ""; $v =~ s/[\t\r\n]+/ /g; return $v; }
+    my @names;
+    while (my $line = <STDIN>) {
+      chomp $line;
+      if ($line =~ /^tasks\[\d+\]\{([^}]*)\}:$/) { @names = split /,/, $1; next; }
+      if ($line !~ s/^  //) { @names = (); next; }
+      next unless @names;
+      my @fields;
+      while (1) {
+        if ($line =~ /\G"((?:[^"\\]|\\.)*)"/gc) { push @fields, $json->decode("\"$1\""); }
+        else { $line =~ /\G([^,]*)/gc; push @fields, $1; }
+        last unless $line =~ /\G,/gc;
+      }
+      next unless @fields == @names;
+      my %row;
+      @row{@names} = map { $_ eq "-" ? "" : $_ } @fields;
+      my @lines = split /\n/, $row{body} // "";
+      my $id = $row{id};
+      my $repo = flat($row{repo});
+      if (($row{state} // "") ne "done" && ($row{hold_kind} // "") eq "captain") {
+        my ($stamp) = ($lines[0] // "") =~ /^Captain hold set: (\S+)$/;
+        my @block;
+        for my $line (@lines[1 .. $#lines]) {
+          last unless $line =~ /^Captain hold (?:kind|recommendation|origin): /;
+          push @block, $line;
+        }
+        my ($kind) = map { /^Captain hold kind: (\S+)$/ ? $1 : () } @block;
+        my ($rec) = map { /^Captain hold recommendation: (.*)$/ ? $1 : () } @block;
+        my $age = age($stamp);
+        $age = age($row{created}) if $age < 0;
+        my $until = $row{hold_until} // "";
+        my $deferred = ($until =~ /^\d{4}-\d\d-\d\d$/ && $until gt $now_day) ? "deferred" : "live";
+        print join("\t", "open", $id, $repo, flat($kind || "other"), $age, flat($stamp),
+          flat($rec), flat($row{title}), $deferred, flat($row{hold_reason})), "\n";
+      }
+      for (my $i = 0; $i <= $#lines; $i++) {
+        next unless $lines[$i] =~ /^Resolution recorded by fm-(?:captain|decision)-hold\.$/;
+        my %head;
+        for (my $j = $i + 1; $j <= $#lines && $lines[$j] ne ""; $j++) {
+          $head{$1} = $2 if $lines[$j] =~ /^([A-Za-z ]+): (.*)$/;
+        }
+        my $outcome = $head{"Call outcome"}
+          || (($head{"Resolution mode"} // "") eq "reconciled" ? "reconciled" : "unrecorded");
+        print join("\t", "record", $id, $repo, flat($head{"Call kind"} || "other"),
+          flat($outcome), age($head{"Call resolved"})), "\n";
+      }
+    }
+  '
+}
+
+# `tally`: one line counting this home's captain calls by kind and ending.
+command_tally() {
+  local days='' scan window='all time'
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --days) shift; days=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  if [ -n "$days" ]; then
+    case "$days" in
+      *[!0-9]*) fail "--days must be a whole number of days: $days" ;;
+    esac
+    window="last $days days"
+  fi
+  command -v tasks-axi >/dev/null 2>&1 || fail "tasks-axi is required"
+  scan=$(captain_calls_scan) || fail "cannot read this home's captain calls"
+  printf '%s\n' "$scan" | awk -F'\t' -v days="${days:--1}" -v window="$window" \
+    -v kinds="$CALL_KINDS" -v outcomes="open $CALL_OUTCOMES reconciled unrecorded" '
+    $1 == "open" { n[$4, "open"]++; total[$4]++; all++ }
+    $1 == "record" && (days < 0 || ($6 >= 0 && $6 <= days)) {
+      n[$4, $5]++; total[$4]++; all++
+    }
+    END {
+      if (!all) { printf "captain calls (%s): none\n", window; exit }
+      line = sprintf("captain calls (%s): %d", window, all)
+      split(kinds, k, " ")
+      split(outcomes, o, " ")
+      sep = " - "
+      for (i = 1; k[i] != ""; i++) {
+        if (!total[k[i]]) continue
+        parts = ""
+        for (j = 1; o[j] != ""; j++) {
+          if (n[k[i], o[j]]) parts = parts (parts == "" ? "" : ", ") o[j] " " n[k[i], o[j]]
+        }
+        line = line sep k[i] " " total[k[i]] " (" parts ")"
+        sep = "; "
+      }
+      print line
+    }'
+}
+
+# `aging`: open captain calls at least N days old, as one card to settle.
+command_aging() {
+  local days=7 scan
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --days) shift; days=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  case "$days" in
+    ''|*[!0-9]*) fail "--days must be a whole number of days: $days" ;;
+  esac
+  command -v tasks-axi >/dev/null 2>&1 || fail "tasks-axi is required"
+  scan=$(captain_calls_scan) || fail "cannot read this home's captain calls"
+  printf '%s\n' "$scan" | awk -F'\t' -v days="$days" '
+    $1 == "open" && $9 == "live" && $5 >= 0 && $5 >= days {
+      rec = ($7 == "" ? "no recommendation recorded" : "recommended: " $7)
+      rows[++count] = sprintf("- %s [%s, %s, %d days] %s: %s; %s", $2, $3, $4, $5, $8, $10, rec)
+    }
+    END {
+      if (!count) { printf "no open captain calls %d or more days old\n", days; exit }
+      printf "settle these %d by recommendation?\n", count
+      for (i = 1; i <= count; i++) print rows[i]
+    }'
+}
+
 # Every key token stated anywhere in a status log. A cheap candidate scan: it
 # over-includes tokens that are only prose, and status_key_closing_verb below is
 # what actually decides what the stream says about a key.
@@ -2051,6 +2537,8 @@ case "${1:-}" in
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
+  tally) shift; command_tally "$@" ;;
+  aging) shift; command_aging "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

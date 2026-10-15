@@ -43,6 +43,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | `reconcile close`, `reconcile note`, `reconcile list` | Retire or list pending reconcile requests. | [Verifying and retiring a request](#verifying-and-retiring-a-request) |
 | `diverged` | Read-only report of a call whose two records disagree. | [Record divergence](#record-divergence) |
+| `tally`, `aging` | Read-only counts of calls by kind and ending, and one card of calls open seven days or more. | [Budget, kinds, and aging](#budget-kinds-and-aging) |
 
 ### Creating a hold (`hold`)
 
@@ -65,8 +66,25 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.
+- A new call is refused while its repo already has three open calls in the home, unless its reason carries a budget-exempt tag; see [Budget, kinds, and aging](#budget-kinds-and-aging).
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+
+### Budget, kinds, and aging
+
+The captain's standing rule is at most three open captain calls per project, so `hold` counts the open calls its repo already has before it creates or holds anything.
+The count reads the configured backlog once, skips calls deferred by a future `--until` date, and never counts a repeat hold of an open call as a new one.
+Nothing in the budget closes, rewrites, or migrates a call that is already open.
+Each lifecycle records its kind on a `Captain hold kind:` body line and an optional `Captain hold recommendation:` line beside the origin line, below the leading hold-set stamp, so the stamp stays the first line every snapshot reads.
+That annotation block is only the run of those lines directly beneath the stamp: a re-hold rewrites that block alone, and the same prefixes elsewhere, including inside the captain's recorded answer, stay byte for byte as text and are never read as metadata.
+Each new resolution record always states `Call origin:` in its header, as `(none)` when the call had no origin, and that line marks the format: completion reads a live call's origin from its annotation block, else that header line, and resolves every record or body written before the line existed exactly as it always did, from the first `Captain hold origin:` line in the body.
+While an answer's close is pending the annotation block stays beneath the stamp, so an interrupted close keeps the live call's kind and recommendation readable, and the post-close normalization moves the block back below the record.
+Holding a call deferred to a future date again without a future date counts it again, so that transition passes the budget check, and kinds, tags, and outcomes match only as exact single values.
+Each new resolution block adds `Call kind:`, an optional `Call outcome:`, and a `Call resolved:` timestamp beneath its `Resolution mode:` line, which is how `tally` counts the way each kind of call ends without a second record.
+`tally` and `aging` only read; `aging` never answers, and a settled card is recorded one call at a time through `answer --outcome recommended`.
+Both read only what the configured backlog still lists, so a Done row an archive has rotated out drops from the tally.
+They read bodies through the backlog listing, which truncates each body at about 500 characters, so an older resolution record can also drop from the tally and a long recommendation can be clipped on the aging card; the budget count and open-call rows are unaffected.
+`bin/fm-captain-hold.sh --help` owns the tags, kinds, outcomes, defaults, and output shapes.
 
 ### Answering a call (`answer`)
 
@@ -534,6 +552,17 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+
+### Budget, kinds, and aging coverage
+
+- A fourth untagged call for one repo is refused before any row is minted or changed, naming the open calls and the exempt tags; an explicit kind without the tag, or one contradicting it, does not get past it.
+- A budget-exempt tag, a repeat hold of an open call, another repo, a call deferred by `--until`, and an answered call each let the next hold through.
+- A composite tag such as `spend production:`, a multiword kind or outcome, and reactivating a deferred call into a full repo are each refused, and every documented tag exempts its call.
+- A re-hold keeps metadata-shaped lines in the task's prose and inside a recorded answer, and the new call reads no kind, recommendation, or origin out of them: an origin quoted in an answer cannot complete another inventory, while the genuine origin still completes after a re-hold.
+- Origin association matches the base revision for original-format, interim-format, and current-format records, live and released, before and after a re-hold: the genuine origin always completes and an unrelated one never does.
+- An interrupted answer close keeps the live call's kind and recommendation through a repeat hold, and the closed record returns resolution-first with those annotations beneath it.
+- An answer replay may omit its outcome or add one the record never had, but is refused when it names a different outcome than the one recorded, and a keyed replay stays an idempotent no-op; a keyed answer that recorded none gains its outcome from a direct replay naming it.
+- Kinds and recommendations survive a repeat hold, `aging` batches only live calls at least the window old into one card without changing the backlog, and `tally` counts each kind by how it ended, including an answer that recorded no outcome and a window that drops older resolutions.
 
 ### Legacy paths
 

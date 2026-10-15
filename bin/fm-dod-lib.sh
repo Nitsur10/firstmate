@@ -408,6 +408,24 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# The acceptance-evidence ask every generated ship and scout definition of done
+# carries: done means the captain or end user can see the result, so the
+# deliverable names what they will see, where, and the proof. bin/fm-teardown.sh
+# warns, never refuses, when a PR description or scout report lacks the line.
+fm_dod_acceptance_line() {  # <mode|scout>
+  case "$1" in
+    scout)
+      printf '%s\n' "The report must carry one line starting \`Acceptance evidence:\` that says what the captain or end user will see from this work, where they will see it, and the proof, or why nobody will see anything yet."
+      ;;
+    local-only)
+      printf '%s\n' "Your tip commit message must carry one line starting \`Acceptance evidence:\` that says what the captain or end user will see once this lands, where they will see it, and the proof."
+      ;;
+    *)
+      printf '%s\n' "Your PR or change description must carry one line starting \`Acceptance evidence:\` that says what the captain or end user will see once this lands, where they will see it, and the proof; write it into your commit message so it reaches that description, and confirm the description carries it before your ready \`done:\`."
+      ;;
+  esac
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
@@ -534,6 +552,7 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  fm_dod_acceptance_line "$mode"
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.

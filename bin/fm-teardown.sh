@@ -197,6 +197,9 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# After a successful cleanup, a scout report or GitHub PR description that lacks
+# its `Acceptance evidence:` line draws a one-line warning, never a refusal
+# (acceptance_evidence_warning below).
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1669,6 +1672,33 @@ backlog_done_args() {
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
+      ;;
+  esac
+}
+
+# Done waits for acceptance: a scout report or a GitHub PR description should
+# carry the `Acceptance evidence:` line bin/fm-dod-lib.sh's
+# fm_dod_acceptance_line asks for. This only warns, after cleanup, and stays
+# silent when the PR description cannot be read, because a missing line is a
+# gap for the captain to see, never a reason to keep unlanded state around.
+acceptance_evidence_warning() {
+  local body
+  case "$KIND" in
+    secondmate) return 0 ;;
+    scout)
+      [ -f "$DATA/$ID/report.md" ] || return 0
+      grep -q 'Acceptance evidence:' "$DATA/$ID/report.md" && return 0
+      echo "warning: $ID's report has no Acceptance evidence: line, so it does not say what the captain or end user will see" >&2
+      ;;
+    *)
+      [ -n "$PR_URL" ] || return 0
+      fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = github ] || return 0
+      body=$(fm_run_timed 15 \
+        gh pr view "$PR_URL" --json body -q .body 2>/dev/null) || return 0
+      case "$body" in
+        *'Acceptance evidence:'*) return 0 ;;
+      esac
+      echo "warning: $PR_URL has no Acceptance evidence: line in its description, so it does not say what the captain or end user will see" >&2
       ;;
   esac
 }
@@ -3939,5 +3969,6 @@ elif teardown_owns_worktree; then
 else
   echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
+acceptance_evidence_warning
 backlog_refresh_reminder
 [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || exit "$TEARDOWN_LOST_SLOT_EXIT"

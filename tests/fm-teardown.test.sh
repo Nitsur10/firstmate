@@ -906,6 +906,75 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+# Done waits for acceptance: cleanup warns, never refuses, when the merged PR's
+# description or a scout report lacks its `Acceptance evidence:` line, and stays
+# quiet when the line is there or the description cannot be read.
+add_gh_pr_body() {  # <case-dir> <body or - for an unreadable description>
+  local case_dir=$1 body=$2
+  mv "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-merged"
+  printf '%s' "$body" > "$case_dir/pr-body"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --json body "*)
+    [ "\$(cat "$case_dir/pr-body")" != - ] || exit 1
+    cat "$case_dir/pr-body"; exit 0 ;;
+esac
+exec "$case_dir/fakebin/gh-merged" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+test_teardown_warns_when_acceptance_evidence_is_missing() {
+  local case_dir rc pr_head body label
+  for body in "Fixes the thing." "Acceptance evidence: the captain sees the card on the board." "-"; do
+    case "$body" in
+      Fixes*) label=missing ;;
+      -) label=unreadable ;;
+      *) label=present ;;
+    esac
+    case_dir=$(make_case "acceptance-pr-$label")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    append_pr_meta_for_current_head "$case_dir"
+    pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+    add_gh_pr_body "$case_dir" "$body"
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "acceptance-pr-$label: the evidence check must never refuse cleanup"
+    if [ "$label" = missing ]; then
+      assert_grep "has no Acceptance evidence: line" "$case_dir/stderr" \
+        "acceptance-pr-$label: a PR description without the line drew no warning"
+    else
+      assert_no_grep "Acceptance evidence" "$case_dir/stderr" \
+        "acceptance-pr-$label: cleanup warned without a readable description lacking the line"
+    fi
+  done
+  for label in missing present; do
+    case_dir=$(make_case "acceptance-scout-$label")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    [ "$label" = missing ] \
+      || printf '%s\n' 'Acceptance evidence: the captain reads the report.' >> "$case_dir/data/task-x1/report.md"
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "acceptance-scout-$label: the evidence check must never refuse cleanup"
+    if [ "$label" = missing ]; then
+      assert_grep "report has no Acceptance evidence: line" "$case_dir/stderr" \
+        "acceptance-scout-$label: a report without the line drew no warning"
+    else
+      assert_no_grep "Acceptance evidence" "$case_dir/stderr" \
+        "acceptance-scout-$label: a report with the line drew a warning"
+    fi
+  done
+  pass "cleanup warns, never refuses, when a PR description or scout report lacks acceptance evidence"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -5082,6 +5151,7 @@ test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
+test_teardown_warns_when_acceptance_evidence_is_missing
 test_scout_nested_clone_returns_with_no_untracked_entries
 test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost

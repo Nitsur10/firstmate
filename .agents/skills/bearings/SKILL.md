@@ -150,6 +150,8 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
 1. **Captain's Call** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
    Deferred or aged holds follow the presentation safety rule above instead.
    Include `contributions.captain` rows in this section, deduplicating any row already represented by its live captain hold or merge call.
+   When `bin/fm-captain-hold.sh aging` lists calls, its card is the one Captain's Call entry for every call it lists, replacing their individual live entries while any aged gate in Charted Next stays as disclosure.
+   When this home has any captain hold, end the section with the one line `bin/fm-captain-hold.sh tally` prints.
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
    When the section is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.

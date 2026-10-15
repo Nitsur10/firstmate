@@ -22,6 +22,10 @@ Prefer holding the work item the question gates over minting a new row; create a
 The originating investigation or review is never its own inventory entry, so hold a separate task for the call and pass `--origin <origin-id>` so `complete` can check it.
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
+Pass `--kind` and, whenever you have one, `--recommend` with the option you would choose, so the call can later be settled by recommendation and tallied by kind.
+Each repo carries at most three open captain calls in a home, and `hold` refuses a fourth.
+A budget-exempt tag (`spend:`, `production:`, `compliance:`, `security:`, `irreversible:`) leading the reason must be literally true of the call, never a way past the budget.
+On a refusal, fold the question into a call already open, settle or defer one first, or decide it yourself when it is not genuinely the captain's.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
 Run the command in the originating work's authoritative `FM_HOME`; secondmate-owned work registers in that secondmate home's backlog, and a question already held anywhere is never re-registered as a second row.
@@ -33,6 +37,9 @@ Never close anything the captain owns without recording what he actually said: `
 A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
 Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
 When the answer changes what a task must build, follow `AGENTS.md` section 7's mid-task ask rule to preserve the captain's words in the brief and steer the worker.
+Record with `--outcome` whether the captain took the recommendation (`recommended`), chose otherwise (`different`), or put the call off (`deferred`), so `tally` shows how each kind of call ends.
+`bin/fm-captain-hold.sh aging` batches calls open seven days or more into one card, and Bearings puts that card to the captain as the single question "settle these N by recommendation?".
+Only the captain's yes settles them: then `answer` each listed call with the captain's words and `--outcome recommended`, and leave any call without a recorded recommendation open for its own answer.
 When the captain says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` so the item leaves the live Captain's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
 "A keyed answer resolves its matching captain-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a captain answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or resolves anything itself.
 Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-answer source feeds it once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
