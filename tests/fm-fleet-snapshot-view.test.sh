@@ -1152,6 +1152,35 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_local_read_only_snapshot() {
+  local home fakebin out key before after
+  home=$(make_home local-read-only)
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  printf '%s\n' '- remote - remote test (host: remote-mac; root: /remote/root; home: /remote/home; scope: test; projects: alpha; added 2026-08-02)' > "$home/data/secondmates.md"
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf called > "$FM_TEST_SSH_CALLED"
+exit 1
+SH
+  chmod +x "$fakebin/ssh"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SSH_CALLED="$home/ssh-called" FM_HOME="$home" "$SNAPSHOT" --local-read-only)
+  [ ! -e "$home/ssh-called" ] || fail "read-only snapshot called SSH"
+  [ ! -e "$home/state/secondmate-summary-cache" ] || fail "read-only snapshot created cache"
+  printf '%s' "$out" | jq -e '.secondmate_current.records[0].current.reason | contains("remote collection disabled")' >/dev/null || fail "remote absence must be explicit"
+  mkdir -m 700 "$home/state/secondmate-summary-cache"
+  key=$(printf '%s\n%s\n%s\n' remote remote-mac /remote/home | shasum -a 256 | awk '{print $1}')
+  printf '%s\n' '{"schema":"fm-secondmate-home-summary.v1","hold_classifier_schema":"fm-captain-hold-buckets.v1","home":"/remote/home","generated":"2026-01-01T00:00:00Z","generated_epoch":1767225600,"valid":true,"state":"no_active_work","invalidity":{"kind":null,"ids":[]},"active_children":[],"decisions_open":[],"holds":[],"queued":[],"landed":[],"endpoints":[],"counts":{},"omitted":[]}' > "$home/state/secondmate-summary-cache/$key.json"
+  before=$(shasum -a 256 "$home/state/secondmate-summary-cache/$key.json")
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SSH_CALLED="$home/ssh-called" FM_HOME="$home" "$SNAPSHOT" --local-read-only)
+  after=$(shasum -a 256 "$home/state/secondmate-summary-cache/$key.json")
+  [ "$before" = "$after" ] && [ ! -e "$home/ssh-called" ] || fail "read-only snapshot changed cache or contacted remote"
+  printf '%s' "$out" | jq -e '.secondmate_current.records[0] | .provenance.summary_source == "remote-ledger-cache" and .freshness.status == "cached"' >/dev/null || fail "cached provenance missing"
+  pass "local-read-only snapshot never contacts remote homes or creates/updates their cache"
+}
+
+test_local_read_only_snapshot
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # fm-fleet-snapshot.sh - structured fleet snapshot with observational caching.
 #
+# --local-read-only skips remote collection and all cache writes, reads existing
+# remote caches only, and disables crew-state forge fallback.
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
 # The command does not acquire the session lock, drain wakes, arm watchers,
@@ -235,11 +237,15 @@ esac
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --local-read-only
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
+--local-read-only makes no remote-home or forge calls and never creates or
+refreshes that cache; unavailable remote summaries remain explicitly unknown.
+Local backend observations and temporary files are still used.
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
@@ -288,9 +294,11 @@ since date, and re-holding with --until remains the durable deferral.
 EOF
 }
 
+LOCAL_READ_ONLY=0
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --local-read-only) LOCAL_READ_ONLY=1; export FM_CREW_STATE_NO_FORGE=1 ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -1007,7 +1015,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),
+            reason:(.hold_reason | trunc(160)),pr_url:(.pr_url // null),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
@@ -1058,12 +1066,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            pr_url:($work.pr_url // .pr.url // null),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,pr_url:($t.pr.url // null),summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
@@ -1114,7 +1123,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),pr_url:(.pr_url // null),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
@@ -1336,6 +1345,7 @@ snapshot_cache_prepare() {
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ $((8#$mode & 077)) -eq 0 ] || return 1
   else
+    [ "$LOCAL_READ_ONLY" -eq 0 ] || return 1
     [ -d "$(dirname "$FM_SNAPSHOT_CACHE_DIR")" ] || return 1
     (umask 077; mkdir "$FM_SNAPSHOT_CACHE_DIR") 2>/dev/null || return 1
   fi
@@ -1360,6 +1370,7 @@ snapshot_route_cache_path() {  # <id> <host> <home>
 
 snapshot_cache_store() {  # <summary-json-file> <destination>
   local summary_file=$1 destination=$2 tmp
+  [ "$LOCAL_READ_ONLY" -eq 0 ] || return 0
   [ "$SNAPSHOT_CACHE_AVAILABLE" -eq 1 ] || return 1
   case "$destination" in "$FM_SNAPSHOT_CACHE_DIR"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
@@ -1411,6 +1422,7 @@ JQ
 $remote_rows
 EOF
   [ -s "$manifest" ] || return 0
+  [ "$LOCAL_READ_ONLY" -eq 0 ] || return 0
 
   collector="$SNAPSHOT_COLLECT_DIR/collect.sh"
   cat > "$collector" <<'BASH'
@@ -1827,6 +1839,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
           summary_source='remote-ledger-cache'
           summary_freshness=cached
+        elif [ "$LOCAL_READ_ONLY" -eq 1 ]; then
+          reason="remote collection disabled in local-read-only mode and no valid cached summary is available"
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
           reason="structured home ledger exceeded byte limit and no valid cached copy is available"
         elif [ "$SNAPSHOT_COLLECTION_TIMED_OUT" -eq 1 ] && [ -z "$collection_status" ]; then
