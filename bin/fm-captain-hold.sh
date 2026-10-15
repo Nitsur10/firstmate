@@ -114,6 +114,10 @@
 # deferred call whose `--until` date is still ahead is left out. It never
 # answers or releases anything; `answer --outcome recommended` per call is how
 # a yes is recorded.
+# Both read bodies through the backlog listing, which truncates each body at
+# about 500 characters, so an older resolution record can drop out of `tally`
+# and a long recommendation can be clipped on the `aging` card; the budget count
+# and the open-call rows are unaffected.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
