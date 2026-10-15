@@ -83,6 +83,7 @@ Holding a call deferred to a future date again without a future date counts it a
 Each new resolution block adds `Call kind:`, an optional `Call outcome:`, and a `Call resolved:` timestamp beneath its `Resolution mode:` line, which is how `tally` counts the way each kind of call ends without a second record.
 `tally` and `aging` only read; `aging` never answers, and a settled card is recorded one call at a time through `answer --outcome recommended`.
 Both read only what the configured backlog still lists, so a Done row an archive has rotated out drops from the tally.
+They read bodies through the backlog listing, which truncates each body at about 500 characters, so an older resolution record can also drop from the tally and a long recommendation can be clipped on the aging card; the budget count and open-call rows are unaffected.
 `bin/fm-captain-hold.sh --help` owns the tags, kinds, outcomes, defaults, and output shapes.
 
 ### Answering a call (`answer`)
