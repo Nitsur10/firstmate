@@ -556,7 +556,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A budget-exempt tag, a repeat hold of an open call, another repo, a call deferred by `--until`, and an answered call each let the next hold through.
 - A composite tag such as `spend production:`, a multiword kind or outcome, and reactivating a deferred call into a full repo are each refused, and every documented tag exempts its call.
 - A re-hold keeps metadata-shaped lines in the task's prose and inside a recorded answer, and the new call reads no kind or recommendation out of them.
-- An answer replay may omit its outcome but is refused when it names a different outcome or one the record never had, and a keyed replay stays an idempotent no-op.
+- An answer replay may omit its outcome or add one the record never had, but is refused when it names a different outcome than the one recorded, and a keyed replay stays an idempotent no-op; a keyed answer that recorded none gains its outcome from a direct replay naming it.
 - Kinds and recommendations survive a repeat hold, `aging` batches only live calls at least the window old into one card without changing the backlog, and `tally` counts each kind by how it ended, including an answer that recorded no outcome and a window that drops older resolutions.
 
 ### Legacy paths
