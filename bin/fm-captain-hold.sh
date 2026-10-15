@@ -90,15 +90,15 @@
 # again without a future `--until` counts it again, so the budget applies.
 # The budget is the captain's standing rule of three, fixed here so no caller
 # environment can lift it.
-# Every resolution block written from now on carries `Call kind:`, a
-# `Call origin:` when the call had one, an optional `Call outcome:`, and a
-# `Call resolved:` UTC timestamp beneath its `Resolution mode:` line. A call's
-# origin is read only from its current annotation block or that header line, so
-# text inside a recorded answer never supplies it, and a re-hold without
-# `--origin` carries the recorded origin forward. While an answer's close is
-# pending, the call's annotation block stays beneath the hold-set stamp, and the
-# post-close normalization moves it back below the record; FM_CAPTAIN_HOLD_NOW pins that timestamp as it pins
-# the hold-set stamp.
+# Every resolution block written from now on carries `Call kind:`,
+# `Call origin:`, an optional `Call outcome:`, and a `Call resolved:` UTC
+# timestamp beneath its `Resolution mode:` line; FM_CAPTAIN_HOLD_NOW pins that
+# timestamp as it pins the hold-set stamp. The origin line is always written,
+# as `(none)` when the call had none, and marks that format, so
+# body_hold_origin below reads each format only from its own script-owned
+# place and text inside a recorded answer never supplies it. While an answer's
+# close is pending, the call's annotation block stays beneath the hold-set
+# stamp, and the post-close normalization moves it back below the record.
 # `tally` is read-only and prints one line counting this home's captain calls
 # by kind and by how each ended: still open, the three outcomes, `reconciled`
 # for an evidence-backed moot close, and `unrecorded` for an answer that named
@@ -671,7 +671,7 @@ resolution_block() {  # <mode>
   local label='Captain decision:' call
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
   call=$(printf 'Call kind: %s' "$CALL_KIND")
-  [ -z "$CALL_ORIGIN" ] || call=$(printf '%s\nCall origin: %s' "$call" "$CALL_ORIGIN")
+  call=$(printf '%s\nCall origin: %s' "$call" "${CALL_ORIGIN:-(none)}")
   [ -z "$CALL_OUTCOME" ] || call=$(printf '%s\nCall outcome: %s' "$call" "$CALL_OUTCOME")
   call=$(printf '%s\nCall resolved: %s' "$call" "$CALL_RESOLVED")
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n%s\n\n%s\n%s\n' \
@@ -961,14 +961,17 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 }
 
 # The origin a hold was recorded for, so `complete` can tell a call held for
-# this origin from one held for another. It is read only from script-owned
-# places: the current annotation block beneath the hold-set stamp, else the
-# newest resolution record's `Call origin:` header line, which a record written
-# by this version always states when the call had one. Text inside a recorded
-# answer or in the task's prose is never consulted. Only a newest record written
-# before records named their origin falls back to the historical first
-# `Captain hold origin:` line anywhere in the body, which is how those rows were
-# always read.
+# this origin from one held for another. Each format is read from the one
+# script-owned place it has always used, and nowhere else:
+# - a live hold's origin line in its annotation block beneath the hold-set
+#   stamp, where every version of this script has written it;
+# - otherwise, a resolution record written by this version, which always states
+#   `Call origin:` in its header (`(none)` when the call had none; parentheses
+#   are never part of a task id), so that line marks the format explicitly;
+# - otherwise, every record and body written before that line existed resolves
+#   exactly as it always did: the first `Captain hold origin:` line in the body.
+# Text inside a record's answer is never read for a record that states its
+# origin, so origin-shaped answer text cannot reassociate the call.
 body_hold_origin() {  # <decoded-task-body>
   local origin
   if [ -n "$(body_hold_set_timestamp "$1")" ]; then
@@ -978,15 +981,18 @@ body_hold_origin() {  # <decoded-task-body>
       return 0
     fi
   fi
-  printf '%s\n' "$1" | awk '
+  if origin=$(printf '%s\n' "$1" | awk '
     done { next }
     !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; next }
     !seen { next }
     /^$/ { done = 1; next }
-    /^Call kind: / { current = 1 }
-    /^Call origin: / { sub(/^Call origin: /, ""); origin = $0 }
-    END { if (!seen) exit 0; if (current) { printf "%s", origin; exit 0 } exit 3 }
-  ' && return 0
+    /^Call origin: / { sub(/^Call origin: /, ""); origin = $0; stated = 1 }
+    END { if (stated) { printf "%s", origin; exit 0 } exit 3 }
+  '); then
+    [ "$origin" != '(none)' ] || origin=''
+    printf '%s' "$origin"
+    return 0
+  fi
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
@@ -1267,9 +1273,10 @@ command_hold() {
   if [ -n "$origin" ]; then
     origin=$(task_identity "$origin") || exit $?
   else
-    # Carry the call's genuine association forward from script-owned places
-    # only; text inside an earlier answer never becomes the origin.
-    origin=$(body_hold_origin "$decoded")
+    # Only a repeat of a live hold keeps an origin in the block; a new
+    # lifecycle without --origin leaves the association to the record that
+    # holds it, as every earlier version did.
+    origin=$(body_hold_block_origin "$decoded")
   fi
   annotated_from=$decoded
   write_hold_annotations "$id" "$(show_field "$show" body)" "$kind" "$recommendation" "$origin" || exit $?

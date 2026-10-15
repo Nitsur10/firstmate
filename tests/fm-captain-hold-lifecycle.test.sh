@@ -4992,8 +4992,66 @@ test_answer_text_never_supplies_the_origin() {
   pass "origin-shaped text in a recorded answer never supplies the call's origin"
 }
 
+# Origin association across record formats, with the base revision's outcome as
+# the expectation in every cell: a record that predates the `Call origin:` line
+# (the original format, and the interim one that already wrote `Call kind:`),
+# a live hold in the original format, and records this version writes, each as
+# found and again after a re-hold without --origin. The genuine origin always
+# completes and an unrelated one never does.
+test_origin_association_matches_base_for_every_record_format() {
+  local home digest id phase
+  home=$(make_home origin-format-matrix)
+  digest=0000000000000000000000000000000000000000000000000000000000000000
+  tasks_in "$home" add sample-genuine-origin "Genuine origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the genuine origin"
+  tasks_in "$home" add sample-unrelated-origin "Unrelated origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the unrelated origin"
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\n\nCaptain decision:\nProceed with the original plan.\n\nCaptain hold origin: sample-genuine-origin\n' \
+    "$digest" > "$home/original-format.txt"
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\nCall kind: other\nCall resolved: 2026-10-14T00:00:00Z\n\nCaptain decision:\nProceed with the original plan.\n\nCaptain hold kind: other\nCaptain hold origin: sample-genuine-origin\n' \
+    "$digest" > "$home/interim-format.txt"
+  printf 'Captain hold set: 2026-10-14T00:00:00Z\nCaptain hold origin: sample-genuine-origin\n' > "$home/original-live.txt"
+  for id in sample-original-released sample-interim-released sample-original-live; do
+    tasks_in "$home" add "$id" "Call $id" --kind captain --repo "$id" >/dev/null || fail "could not create $id"
+  done
+  tasks_in "$home" update sample-original-released --body-file "$home/original-format.txt" >/dev/null \
+    || fail "could not write the original-format record"
+  tasks_in "$home" update sample-interim-released --body-file "$home/interim-format.txt" >/dev/null \
+    || fail "could not write the interim-format record"
+  tasks_in "$home" update sample-original-live --body-file "$home/original-live.txt" >/dev/null \
+    || fail "could not write the original-format live hold"
+  tasks_in "$home" hold sample-original-live --reason "choose" --kind captain >/dev/null \
+    || fail "could not hold the original-format live call"
+  printf 'Proceed with the original plan.\n' > "$home/answer.txt"
+  for id in sample-current-released sample-current-live; do
+    run_captain_budgeted "$home" hold "$id" --title "Call $id" --reason "choose" --repo "$id" \
+      --origin sample-genuine-origin >/dev/null || fail "could not hold $id"
+  done
+  run_captain_budgeted "$home" answer sample-current-released --decision-file "$home/answer.txt" --release >/dev/null \
+    || fail "could not release the current-format call"
+  for id in sample-original-released sample-interim-released sample-original-live \
+    sample-current-released sample-current-live; do
+    for phase in as-found re-held; do
+      if [ "$phase" = re-held ]; then
+        run_captain_budgeted "$home" hold "$id" --reason "second question" >/dev/null \
+          || fail "could not re-hold $id"
+      fi
+      if run_captain_budgeted "$home" complete sample-unrelated-origin "$id" \
+        > "$home/unrelated.out" 2> "$home/unrelated.err"; then
+        fail "$id ($phase) completed an unrelated origin's inventory"
+      fi
+      run_captain_budgeted "$home" complete sample-genuine-origin "$id" >/dev/null \
+        || fail "$id ($phase) no longer completes its genuine origin"
+    done
+  done
+  assert_contains "$(tasks_in "$home" show sample-current-released --full)" "Call origin: sample-genuine-origin" \
+    "a current-format record did not state its origin"
+  pass "origin association matches the base revision for original, interim, and current record formats, live and released, before and after re-hold"
+}
+
 test_call_budget_refuses_a_fourth_untagged_call
 test_kinds_outcomes_tally_and_aging
+test_origin_association_matches_base_for_every_record_format
 test_answer_text_never_supplies_the_origin
 test_rehold_keeps_metadata_shaped_text_in_answers_and_prose
 test_budget_tags_kinds_and_outcomes_match_exactly
