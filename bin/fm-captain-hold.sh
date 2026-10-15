@@ -80,8 +80,8 @@
 # hold keeps a recorded recommendation unless `--recommend` replaces it.
 # `answer --outcome` records whether the captain took the recommendation
 # (`recommended`), chose otherwise (`different`), or put it off (`deferred`).
-# FM_CAPTAIN_CALL_BUDGET pins a different budget for tests only; the
-# captain's standing rule is three.
+# The budget is the captain's standing rule of three, fixed here so no caller
+# environment can lift it.
 # Every resolution block written from now on carries `Call kind:`, an optional
 # `Call outcome:`, and a `Call resolved:` UTC timestamp beneath its
 # `Resolution mode:` line; FM_CAPTAIN_HOLD_NOW pins that timestamp as it pins
@@ -376,10 +376,7 @@ DECISION_TEXT=''
 DECISION_DIGEST=''
 
 # The call budget, kinds, and outcomes (see "CALL BUDGET" in the header).
-CALL_BUDGET=${FM_CAPTAIN_CALL_BUDGET:-3}
-case "$CALL_BUDGET" in
-  ''|*[!0-9]*|0) printf 'fm-captain-hold: FM_CAPTAIN_CALL_BUDGET must be a positive integer\n' >&2; exit 2 ;;
-esac
+CALL_BUDGET=3
 CALL_KINDS='spend production compliance security irreversible design cosmetic other'
 CALL_BUDGET_EXEMPT='spend production compliance security irreversible'
 CALL_OUTCOMES='recommended different deferred'
