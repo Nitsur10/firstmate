@@ -1693,7 +1693,7 @@ acceptance_evidence_warning() {
     *)
       [ -n "$PR_URL" ] || return 0
       fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = github ] || return 0
-      body=$(fm_run_timed "${FM_TEARDOWN_ACCEPTANCE_TIMEOUT:-15}" \
+      body=$(fm_run_timed 15 \
         gh pr view "$PR_URL" --json body -q .body 2>/dev/null) || return 0
       case "$body" in
         *'Acceptance evidence:'*) return 0 ;;

@@ -83,7 +83,8 @@
 # `answer --outcome` records whether the captain took the recommendation
 # (`recommended`), chose otherwise (`different`), or put it off (`deferred`).
 # A replay of a recorded answer may omit `--outcome`; one it names must match
-# the outcome already recorded, so a changed or newly added outcome is refused.
+# the outcome already recorded, so a changed outcome is refused, while one the
+# record never had is added to the newest record's header.
 # Kinds, tags, and outcomes match exactly, so a multiword value such as
 # `spend production` is none of them. Holding a call deferred to a future date
 # again without a future `--until` counts it again, so the budget applies.
@@ -622,15 +623,25 @@ recorded_call_outcome() {  # <shown-task-body>
   '
 }
 
-# A replay of a recorded answer may omit --outcome, but an outcome it does name
-# must be the one already recorded: success must never report an outcome the
-# record does not hold.
-require_replay_outcome() {  # <task-id> <shown-task-body>
-  local recorded
+# A replay of a recorded answer may omit --outcome. One it names must match the
+# outcome already recorded; when the record holds none, the replay adds it to the
+# newest record's header and changes nothing else in the body.
+reconcile_replay_outcome() {  # <task-id> <shown-task-body>
+  local id=$1 recorded body
   [ -n "$CALL_OUTCOME" ] || return 0
-  recorded=$(recorded_call_outcome "$2") || fail "could not read the recorded outcome for $1"
-  [ "$recorded" = "$CALL_OUTCOME" ] \
-    || fail "task $1 records ${recorded:-no} outcome for this answer; a replay cannot record $CALL_OUTCOME"
+  recorded=$(recorded_call_outcome "$2") || fail "could not read the recorded outcome for $id"
+  if [ -n "$recorded" ]; then
+    [ "$recorded" = "$CALL_OUTCOME" ] \
+      || fail "task $id records $recorded outcome for this answer; a replay cannot record $CALL_OUTCOME"
+    return 0
+  fi
+  body=$(decode_shown_value "$2") || fail "could not decode the body for $id"
+  body=$(printf '%s\n' "$body" | awk -v outcome="$CALL_OUTCOME" '
+    !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; inhead = 1; print; next }
+    inhead && (/^$/ || /^Call resolved: /) { print "Call outcome: " outcome; inhead = 0 }
+    { print }
+  ')
+  write_task_body "$id" "$body" "replayed call outcome"
 }
 
 closed_answer_replay_mode_compatible() {  # <mode> <task-body>
@@ -1387,7 +1398,7 @@ command_answer() {
         || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
-      require_replay_outcome "$id" "$body"
+      reconcile_replay_outcome "$id" "$body"
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
         publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
@@ -1430,7 +1441,7 @@ command_answer() {
         answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
-      require_replay_outcome "$id" "$body"
+      reconcile_replay_outcome "$id" "$body"
       if ! close_answered "$id" "$release"; then
         fail "could not close answered captain-held task $id"
       fi
@@ -1460,7 +1471,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
-    require_replay_outcome "$id" "$body"
+    reconcile_replay_outcome "$id" "$body"
     remove_interrupted_answer_stamp "$id"
     publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"

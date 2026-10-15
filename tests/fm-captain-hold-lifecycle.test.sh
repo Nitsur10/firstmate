@@ -4896,9 +4896,10 @@ test_reactivating_a_deferred_call_respects_the_budget() {
   pass "reactivating a deferred call counts against the budget while a still-deferred repeat does not"
 }
 
-# A replay of a recorded answer may omit --outcome but never change or add one,
-# on the direct path; a keyed answer records none and replays cleanly.
-test_answer_replay_never_changes_the_recorded_outcome() {
+# A replay of a recorded answer may omit --outcome and may add one the record
+# never had, but never change a recorded one; a keyed answer records none and
+# a direct replay naming the outcome adds it.
+test_answer_replay_adds_but_never_changes_the_recorded_outcome() {
   local home out
   home=$(make_home answer-replay-outcome)
   printf 'Yes.\n' > "$home/yes.txt"
@@ -4919,9 +4920,11 @@ test_answer_replay_never_changes_the_recorded_outcome() {
   assert_grep "records recommended outcome" "$home/changed.err" "the refusal did not name the recorded outcome"
   run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" >/dev/null \
     || fail "could not answer without an outcome"
-  if run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" --outcome recommended \
-    > "$home/added.out" 2> "$home/added.err"; then
-    fail "a replay added an outcome the answer never recorded"
+  run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" --outcome deferred >/dev/null \
+    || fail "a replay could not add the outcome the answer never recorded"
+  if run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" --outcome different \
+    > "$home/changed.out" 2> "$home/changed.err"; then
+    fail "a replay changed an outcome it had added"
   fi
   run_captain_budgeted "$home" hold sample-replay-keyed --title "Keyed replay" --reason "choose" \
     --repo sample-replay-keyed >/dev/null || fail "could not hold the keyed call"
@@ -4931,9 +4934,17 @@ test_answer_replay_never_changes_the_recorded_outcome() {
   out=$(run_captain_budgeted "$home" answers --source "test board" < "$home/keyed.tsv") \
     || fail "a keyed replay failed"
   assert_contains "$out" "closed: sample-replay-keyed" "a keyed replay was not an idempotent no-op"
-  assert_equals "captain calls (all time): 3 - other 3 (recommended 1, unrecorded 2)" \
+  assert_equals "captain calls (all time): 3 - other 3 (recommended 1, deferred 1, unrecorded 1)" \
     "$(run_captain_budgeted "$home" tally)" "the tally did not keep each recorded outcome"
-  pass "an answer replay may omit but never change or add its recorded outcome"
+  printf 'Captain answered this call through test board.\nTask: sample-replay-keyed\nAnswer: yes\nAnswer as shown to the captain: Yes\n' \
+    > "$home/keyed-decision.txt"
+  run_captain_budgeted "$home" answer sample-replay-keyed --decision-file "$home/keyed-decision.txt" --outcome recommended >/dev/null \
+    || fail "a direct replay could not add an outcome to a keyed answer"
+  assert_equals "captain calls (all time): 3 - other 3 (recommended 2, deferred 1)" \
+    "$(run_captain_budgeted "$home" tally)" "the tally did not count the outcome added to the keyed answer"
+  run_captain_budgeted "$home" answer sample-replay-keyed --decision-file "$home/keyed-decision.txt" >/dev/null \
+    || fail "a bare replay after the added outcome failed"
+  pass "an answer replay may omit or add but never change its recorded outcome"
 }
 
 test_call_budget_refuses_a_fourth_untagged_call
@@ -4941,7 +4952,7 @@ test_kinds_outcomes_tally_and_aging
 test_rehold_keeps_metadata_shaped_text_in_answers_and_prose
 test_budget_tags_kinds_and_outcomes_match_exactly
 test_reactivating_a_deferred_call_respects_the_budget
-test_answer_replay_never_changes_the_recorded_outcome
+test_answer_replay_adds_but_never_changes_the_recorded_outcome
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
