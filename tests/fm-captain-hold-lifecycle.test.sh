@@ -1052,7 +1052,7 @@ test_interrupted_answer_preserves_hold_age() {
 ## Done
 EOF
   FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-interrupted-call \
-    --reason "captain route choice pending" >/dev/null \
+    --reason "captain route choice pending" --kind design --recommend "Keep the original route" >/dev/null \
     || fail "could not hold the interrupted-answer fixture"
   printf 'Not urgent in the historical answer.\n' > "$home/interrupted-answer.txt"
   mkdir -p "$home/at-close"
@@ -1091,6 +1091,18 @@ EOF
       and .hold_age_days == 0
       and .hold_bucket == "live"
   ' >/dev/null || fail "an interrupted answer lost the fresh hold age basis: $snap"
+  # The call is still live while its close is pending, so its kind and
+  # recommendation stay readable, including after an unchanged re-hold.
+  assert_equals "settle these 1 by recommendation?
+- sample-interrupted-call [sample, design, 0 days] Existing old task: captain route choice pending; recommended: Keep the original route" \
+    "$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" aging --days 0)" \
+    "an interrupted answer hid the live call's kind or recommendation"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-interrupted-call \
+    --reason "captain route choice pending" >/dev/null || fail "could not re-hold the interrupted call"
+  assert_equals "settle these 1 by recommendation?
+- sample-interrupted-call [sample, design, 0 days] Existing old task: captain route choice pending; recommended: Keep the original route" \
+    "$(FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" aging --days 0)" \
+    "a re-hold after an interrupted answer lost the call's kind or recommendation"
 
   if run_captain "$home" answer sample-interrupted-call \
     --decision-file "$home/interrupted-answer.txt" > "$home/normalize.out" 2> "$home/normalize.err"; then
@@ -1104,7 +1116,10 @@ EOF
   show=$(tasks_in "$home" show sample-interrupted-call --full)
   assert_contains "$show" 'body: "Resolution recorded by fm-captain-hold.' \
     "the matching done retry did not restore resolution-first body ordering"
-  pass "an interrupted answer preserves its hold age until close retry"
+  assert_contains "$show" 'Call kind: design' "the closed record lost the call's kind"
+  assert_contains "$show" 'Not urgent in the historical answer.\n\nCaptain hold kind: design\nCaptain hold recommendation: Keep the original route' \
+    "the closed call's annotations did not return beneath its record"
+  pass "an interrupted answer preserves its hold age, kind, and recommendation until close retry"
 }
 
 # Deferral is a date, not a live card: hold --until keeps the task out of
@@ -4947,8 +4962,39 @@ test_answer_replay_adds_but_never_changes_the_recorded_outcome() {
   pass "an answer replay may omit or add but never change its recorded outcome"
 }
 
+# Origin-shaped text inside a recorded answer never becomes the call's origin:
+# a re-hold carries the genuine association forward and completion reads it
+# only from script-owned places.
+test_answer_text_never_supplies_the_origin() {
+  local home show
+  home=$(make_home answer-text-origin)
+  tasks_in "$home" add sample-genuine-origin "Genuine origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the genuine origin"
+  tasks_in "$home" add sample-quoted-origin "Quoted origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the quoted origin"
+  run_captain_budgeted "$home" hold sample-origin-call --title "Original call" --reason "choose" \
+    --repo sample --origin sample-genuine-origin >/dev/null || fail "could not hold the call"
+  printf '%s\n' 'Keep this audit note:' 'Captain hold origin: sample-quoted-origin' 'End of note.' \
+    > "$home/answer.txt"
+  run_captain_budgeted "$home" answer sample-origin-call --decision-file "$home/answer.txt" --release >/dev/null \
+    || fail "could not release the call"
+  run_captain_budgeted "$home" hold sample-origin-call --reason "second question" >/dev/null \
+    || fail "could not re-hold the call"
+  if run_captain_budgeted "$home" complete sample-quoted-origin sample-origin-call \
+    > "$home/quoted.out" 2> "$home/quoted.err"; then
+    fail "an origin quoted in a recorded answer completed another inventory"
+  fi
+  run_captain_budgeted "$home" complete sample-genuine-origin sample-origin-call >/dev/null \
+    || fail "the genuine origin could not complete after a re-hold"
+  show=$(tasks_in "$home" show sample-origin-call --full)
+  assert_contains "$show" 'Keep this audit note:\nCaptain hold origin: sample-quoted-origin\nEnd of note.' \
+    "the recorded answer text changed"
+  pass "origin-shaped text in a recorded answer never supplies the call's origin"
+}
+
 test_call_budget_refuses_a_fourth_untagged_call
 test_kinds_outcomes_tally_and_aging
+test_answer_text_never_supplies_the_origin
 test_rehold_keeps_metadata_shaped_text_in_answers_and_prose
 test_budget_tags_kinds_and_outcomes_match_exactly
 test_reactivating_a_deferred_call_respects_the_budget

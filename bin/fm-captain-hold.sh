@@ -90,9 +90,14 @@
 # again without a future `--until` counts it again, so the budget applies.
 # The budget is the captain's standing rule of three, fixed here so no caller
 # environment can lift it.
-# Every resolution block written from now on carries `Call kind:`, an optional
-# `Call outcome:`, and a `Call resolved:` UTC timestamp beneath its
-# `Resolution mode:` line; FM_CAPTAIN_HOLD_NOW pins that timestamp as it pins
+# Every resolution block written from now on carries `Call kind:`, a
+# `Call origin:` when the call had one, an optional `Call outcome:`, and a
+# `Call resolved:` UTC timestamp beneath its `Resolution mode:` line. A call's
+# origin is read only from its current annotation block or that header line, so
+# text inside a recorded answer never supplies it, and a re-hold without
+# `--origin` carries the recorded origin forward. While an answer's close is
+# pending, the call's annotation block stays beneath the hold-set stamp, and the
+# post-close normalization moves it back below the record; FM_CAPTAIN_HOLD_NOW pins that timestamp as it pins
 # the hold-set stamp.
 # `tally` is read-only and prints one line counting this home's captain calls
 # by kind and by how each ended: still open, the three outcomes, `reconciled`
@@ -391,6 +396,7 @@ CALL_OUTCOMES='recommended different deferred'
 CALL_KIND=other
 CALL_OUTCOME=''
 CALL_RESOLVED=''
+CALL_ORIGIN=''
 
 # Exact membership of one single-word value; anything carrying whitespace is
 # never a member, so a value such as `spend production` matches nothing.
@@ -654,12 +660,14 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
 # and carries verified evidence; every other mode carries what the captain said.
-# The call's kind, its optional outcome, and when it was resolved sit beneath
-# the mode so `tally` can count how each kind ends.
+# The call's kind, its origin when it had one, its optional outcome, and when it
+# was resolved sit beneath the mode: `tally` counts how each kind ends from
+# them, and `complete` reads a closed call's origin from them.
 resolution_block() {  # <mode>
   local label='Captain decision:' call
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
   call=$(printf 'Call kind: %s' "$CALL_KIND")
+  [ -z "$CALL_ORIGIN" ] || call=$(printf '%s\nCall origin: %s' "$call" "$CALL_ORIGIN")
   [ -z "$CALL_OUTCOME" ] || call=$(printf '%s\nCall outcome: %s' "$call" "$CALL_OUTCOME")
   call=$(printf '%s\nCall resolved: %s' "$call" "$CALL_RESOLVED")
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n%s\n\n%s\n%s\n' \
@@ -948,10 +956,33 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   rm -f -- "$tmp"
 }
 
-# The origin a hold was recorded for lives in the held task's own body, on a
-# line of its own, so `complete` can tell a call held for this origin from one
-# held for another. Omitting --origin leaves any existing association intact.
+# The origin a hold was recorded for, so `complete` can tell a call held for
+# this origin from one held for another. It is read only from script-owned
+# places: the current annotation block beneath the hold-set stamp, else the
+# newest resolution record's `Call origin:` header line, which a record written
+# by this version always states when the call had one. Text inside a recorded
+# answer or in the task's prose is never consulted. Only a newest record written
+# before records named their origin falls back to the historical first
+# `Captain hold origin:` line anywhere in the body, which is how those rows were
+# always read.
 body_hold_origin() {  # <decoded-task-body>
+  local origin
+  if [ -n "$(body_hold_set_timestamp "$1")" ]; then
+    origin=$(body_hold_block_origin "$1")
+    if [ -n "$origin" ]; then
+      printf '%s' "$origin"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$1" | awk '
+    done { next }
+    !seen && /^Resolution recorded by fm-(captain|decision)-hold\.$/ { seen = 1; next }
+    !seen { next }
+    /^$/ { done = 1; next }
+    /^Call kind: / { current = 1 }
+    /^Call origin: / { sub(/^Call origin: /, ""); origin = $0 }
+    END { if (!seen) exit 0; if (current) { printf "%s", origin; exit 0 } exit 3 }
+  ' && return 0
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
@@ -1232,7 +1263,9 @@ command_hold() {
   if [ -n "$origin" ]; then
     origin=$(task_identity "$origin") || exit $?
   else
-    origin=$(body_hold_block_origin "$decoded")
+    # Carry the call's genuine association forward from script-owned places
+    # only; text inside an earlier answer never becomes the origin.
+    origin=$(body_hold_origin "$decoded")
   fi
   annotated_from=$decoded
   write_hold_annotations "$id" "$(show_field "$show" body)" "$kind" "$recommendation" "$origin" || exit $?
@@ -1268,27 +1301,38 @@ command_hold() {
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
+  local id=$1 mode=$2 body=$3 new_body hold_set block rest
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   CALL_KIND=$(body_hold_kind "$body")
+  CALL_ORIGIN=$(body_hold_origin "$body")
   CALL_RESOLVED=$(captain_now) || exit $?
   new_body=$(resolution_block "$mode")
   hold_set=$(body_hold_set_timestamp "$body")
   if [ -n "$hold_set" ]; then
-    body=${body#"Captain hold set: $hold_set"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    # While the close is pending the call is still live, so its annotation
+    # block stays beneath the stamp where every reader looks for it; the
+    # post-close normalization moves it below the record.
+    block=$(hold_annotation_block "$body")
+    rest=$(hold_annotation_rest "$body" | awk 'NF || started { started = 1; print }')
+    if [ -n "$block" ]; then
+      new_body=$(printf 'Captain hold set: %s\n%s\n\n%s' "$hold_set" "$block" "$new_body")
+    else
+      new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    fi
+    body=$rest
   fi
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
+  write_body_archived "$id" "$new_body"
+}
+
+write_body_archived() {  # <task-id> <decoded-body>
+  local id=$1 tmp
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
     || fail "cannot stage the resolution record"
-  if ! printf '%s\n' "$new_body" > "$tmp"; then
+  if ! printf '%s\n' "$2" > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot stage the resolution record for $id"
   fi
@@ -1337,17 +1381,37 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
-  local id=$1 show body existing tmp
+  local id=$1 show body existing block after record lines rest tmp
   task_show_or_fail "$id" "task $id disappeared after closing"
   body=$(decode_shown_value "$(show_field "$show" body)") \
     || fail "could not decode the closed body for $id"
   existing=$(body_hold_set_timestamp "$body")
   [ -n "$existing" ] || return 0
-  body=${body#"Captain hold set: $existing"}
-  case "$body" in
-    $'\n\n'*) body=${body#$'\n\n'} ;;
-    $'\n'*) body=${body#$'\n'} ;;
-  esac
+  block=$(hold_annotation_block "$body")
+  after=$(hold_annotation_rest "$body" | awk 'NF || started { started = 1; print }')
+  body=$after
+  if [ -n "$block" ]; then
+    # The closed call's annotation block goes back beneath its record, which is
+    # the header through its blank line, the label, and this decision's lines.
+    lines=$(printf '%s\n' "$DECISION_TEXT" | wc -l | tr -d ' ')
+    record=$(printf '%s\n' "$after" | awk -v n="$lines" '
+      NR == 1 && !/^Resolution recorded by fm-captain-hold\.$/ { exit 1 }
+      !blank { print; if ($0 == "") blank = 1; next }
+      !label { print; label = 1; next }
+      count < n { print; count++; next }
+      { exit }
+    ') || record=''
+    if [ -n "$record" ] && [ "$(printf '%s\n' "$record" | tail -n "$lines")" = "$DECISION_TEXT" ]; then
+      lines=$(printf '%s\n' "$record" | wc -l | tr -d ' ')
+      rest=$(printf '%s\n' "$after" | awk -v n="$lines" 'NR > n' | awk 'NF || started { started = 1; print }')
+      body=$(printf '%s\n\n%s' "$record" "$block")
+      [ -z "$rest" ] || body=$(printf '%s\n\n%s' "$body" "$rest")
+    else
+      # A record this decision did not write keeps the block above it rather
+      # than guessing where the record ends.
+      body=$(printf '%s\n\n%s' "$block" "$after")
+    fi
+  fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
   if ! printf '%s\n' "$body" > "$tmp" \
