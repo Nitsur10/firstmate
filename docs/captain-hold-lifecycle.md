@@ -76,6 +76,8 @@ The captain's standing rule is at most three open captain calls per project, so 
 The count reads the configured backlog once, skips calls deferred by a future `--until` date, and never counts a repeat hold of an open call as a new one.
 Nothing in the budget closes, rewrites, or migrates a call that is already open.
 Each lifecycle records its kind on a `Captain hold kind:` body line and an optional `Captain hold recommendation:` line beside the origin line, below the leading hold-set stamp, so the stamp stays the first line every snapshot reads.
+That annotation block is only the run of those lines directly beneath the stamp: a re-hold rewrites that block alone, and the same prefixes elsewhere, including inside the captain's recorded answer, stay byte for byte as text and are never read as metadata.
+Holding a call deferred to a future date again without a future date counts it again, so that transition passes the budget check, and kinds, tags, and outcomes match only as exact single values.
 Each new resolution block adds `Call kind:`, an optional `Call outcome:`, and a `Call resolved:` timestamp beneath its `Resolution mode:` line, which is how `tally` counts the way each kind of call ends without a second record.
 `tally` and `aging` only read; `aging` never answers, and a settled card is recorded one call at a time through `answer --outcome recommended`.
 Both read only what the configured backlog still lists, so a Done row an archive has rotated out drops from the tally.
@@ -552,6 +554,9 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 - A fourth untagged call for one repo is refused before any row is minted or changed, naming the open calls and the exempt tags; an explicit kind without the tag, or one contradicting it, does not get past it.
 - A budget-exempt tag, a repeat hold of an open call, another repo, a call deferred by `--until`, and an answered call each let the next hold through.
+- A composite tag such as `spend production:`, a multiword kind or outcome, and reactivating a deferred call into a full repo are each refused, and every documented tag exempts its call.
+- A re-hold keeps metadata-shaped lines in the task's prose and inside a recorded answer, and the new call reads no kind or recommendation out of them.
+- An answer replay may omit its outcome but is refused when it names a different outcome or one the record never had, and a keyed replay stays an idempotent no-op.
 - Kinds and recommendations survive a repeat hold, `aging` batches only live calls at least the window old into one card without changing the backlog, and `tally` counts each kind by how it ended, including an answer that recorded no outcome and a window that drops older resolutions.
 
 ### Legacy paths

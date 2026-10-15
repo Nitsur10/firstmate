@@ -4355,11 +4355,19 @@ SH
       assert_present "$home/before-backend-hold" "the successful retry did not reach the backend hold"
       shown=$(cat "$home/before-backend-hold")
       assert_contains "$shown" 'Captain hold origin: origin-b' "the backend hold ran before the new origin was recorded"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "the backend hold ran with the old association"
+      # A released hold keeps its earlier answer, and the origin line beneath
+      # it, as text; the current association is the first origin line.
+      assert_equals 'origin-b' "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: [^\\"]*' | head -1 | sed 's/^Captain hold origin: //')" \
+        "the backend hold ran with the old association"
+      [ "$phase" = released ] || assert_not_contains "$shown" 'Captain hold origin: origin-a' "the backend hold ran with the old association"
       shown=$(tasks_in "$home" show "$id" --full)
       assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
       assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
+      # A released hold keeps its earlier answer, and the origin line beneath
+      # it, as text; the current association is the first origin line.
+      assert_equals 'origin-b' "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: [^\\"]*' | head -1 | sed 's/^Captain hold origin: //')" \
+        "a successful hold retained the old association"
+      [ "$phase" = released ] || assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
       run_captain "$home" complete origin-b "$id" >/dev/null \
         || fail "a successful hold could not complete B"
       run_captain "$home" verify origin-b >/dev/null || fail "a successful hold could not verify B"
@@ -4795,8 +4803,145 @@ test_kinds_outcomes_tally_and_aging() {
   pass "kinds and recommendations are recorded, aging batches week-old calls read-only, and tally counts how each kind ends"
 }
 
+# A re-hold rewrites only the annotation block beneath the hold-set stamp. The
+# same prefixes inside the task's own prose or inside a recorded answer are
+# text, kept byte for byte and never read as the new lifecycle's metadata.
+test_rehold_keeps_metadata_shaped_text_in_answers_and_prose() {
+  local home show line
+  home=$(make_home rehold-metadata-text)
+  printf '%s\n' 'Task notes:' 'Captain hold kind: spend' 'Captain hold recommendation: prose line' \
+    'Captain hold origin: prose-origin' 'End of notes.' > "$home/notes.txt"
+  tasks_in "$home" add sample-history "History work" --repo sample >/dev/null || fail "could not create the work item"
+  tasks_in "$home" update sample-history --body-file "$home/notes.txt" >/dev/null || fail "could not write the task prose"
+  run_captain_budgeted "$home" hold sample-history --reason "design: choose" --recommend "use original plan" >/dev/null \
+    || fail "could not hold the work item"
+  printf '%s\n' 'Keep this exact audit note:' 'Captain hold kind: cosmetic' \
+    'Captain hold recommendation: do not lose this instruction' 'Captain hold origin: answer-origin' \
+    'End of decision.' > "$home/decision.txt"
+  run_captain_budgeted "$home" answer sample-history --decision-file "$home/decision.txt" --release \
+    --outcome recommended >/dev/null || fail "could not release the work item"
+  run_captain_budgeted "$home" hold sample-history --reason "second question" >/dev/null \
+    || fail "could not re-hold the work item"
+  show=$(tasks_in "$home" show sample-history --full)
+  for line in 'Keep this exact audit note:' 'Captain hold kind: cosmetic' \
+    'Captain hold recommendation: do not lose this instruction' 'Captain hold origin: answer-origin' \
+    'End of decision.' 'Task notes:' 'Captain hold kind: spend' 'Captain hold recommendation: prose line' \
+    'Captain hold origin: prose-origin' 'End of notes.'; do
+    assert_contains "$show" "$line" "a re-hold deleted the text line: $line"
+  done
+  assert_contains "$show" "Captain hold set: " "the re-hold lost its stamp"
+  assert_equals "settle these 1 by recommendation?
+- sample-history [sample, other, 0 days] History work: second question; no recommendation recorded" \
+    "$(run_captain_budgeted "$home" aging --days 0)" \
+    "the re-held call read a recommendation or kind out of earlier text"
+  pass "a re-hold keeps metadata-shaped text in prose and recorded answers and reads only its own block"
+}
+
+# Kinds, tags, and outcomes are single exact values; each of the five
+# documented tags exempts a call, while a composite tag does not.
+test_budget_tags_kinds_and_outcomes_match_exactly() {
+  local home tag id
+  home=$(make_home budget-exact-tags)
+  for id in sample-exact-1 sample-exact-2 sample-exact-3; do
+    run_captain_budgeted "$home" hold "$id" --title "Exact $id" --reason "choose" --repo sample >/dev/null \
+      || fail "could not hold $id"
+  done
+  if run_captain_budgeted "$home" hold sample-exact-bypass --title "Composite tag" \
+    --reason "spend production: choose" --repo sample > "$home/composite.out" 2> "$home/composite.err"; then
+    fail "a composite tag bypassed the budget"
+  fi
+  assert_grep "already has 3 open captain calls" "$home/composite.err" "a composite tag was not counted"
+  if run_captain_budgeted "$home" hold sample-exact-kind --title "Multiword kind" --reason "choose" \
+    --kind "spend production" --repo other > "$home/kind.out" 2> "$home/kind.err"; then
+    fail "hold accepted a multiword kind"
+  fi
+  for tag in spend production compliance security irreversible; do
+    run_captain_budgeted "$home" hold "sample-exact-$tag" --title "Exempt $tag" --reason "$tag: choose" \
+      --repo sample >/dev/null || fail "the documented $tag: tag did not exempt its call"
+  done
+  printf 'Pick one.\n' > "$home/answer.txt"
+  if run_captain_budgeted "$home" answer sample-exact-1 --decision-file "$home/answer.txt" \
+    --outcome "recommended different" > "$home/outcome.out" 2> "$home/outcome.err"; then
+    fail "answer accepted a multiword outcome"
+  fi
+  assert_contains "$(tasks_in "$home" show sample-exact-1 --full)" "held: yes" "a refused outcome closed the call"
+  pass "tags, kinds, and outcomes match exactly and every documented tag exempts its call"
+}
+
+# Holding a call deferred to a future date again without a future date moves it
+# back into the counted set, so the budget applies; a repeat that keeps a
+# future date stays allowed.
+test_reactivating_a_deferred_call_respects_the_budget() {
+  local home before id
+  home=$(make_home budget-reactivate)
+  for id in sample-react-a sample-react-b sample-react-c; do
+    run_captain_budgeted "$home" hold "$id" --title "React $id" --reason "choose" --repo sample >/dev/null \
+      || fail "could not hold $id"
+  done
+  run_captain_budgeted "$home" hold sample-react-a --reason "later" --until 2099-01-01 >/dev/null \
+    || fail "could not defer a call"
+  run_captain_budgeted "$home" hold sample-react-d --title "React d" --reason "choose" --repo sample >/dev/null \
+    || fail "deferring a call did not free budget"
+  before=$(cat "$home/data/backlog.md")
+  if run_captain_budgeted "$home" hold sample-react-a --reason "choose now" \
+    > "$home/react.out" 2> "$home/react.err"; then
+    fail "reactivating a deferred call bypassed the budget"
+  fi
+  assert_grep "sample-react-b, sample-react-c, sample-react-d" "$home/react.err" "the refusal did not name the counted calls"
+  assert_equals "$before" "$(cat "$home/data/backlog.md")" "a refused reactivation changed the backlog"
+  assert_contains "$(tasks_in "$home" show sample-react-a --full)" "hold_until: 2099-01-01" \
+    "a refused reactivation lost the deferral"
+  run_captain_budgeted "$home" hold sample-react-a --reason "still later" --until 2099-02-01 >/dev/null \
+    || fail "a repeat that keeps a future date was refused"
+  pass "reactivating a deferred call counts against the budget while a still-deferred repeat does not"
+}
+
+# A replay of a recorded answer may omit --outcome but never change or add one,
+# on the direct path; a keyed answer records none and replays cleanly.
+test_answer_replay_never_changes_the_recorded_outcome() {
+  local home out
+  home=$(make_home answer-replay-outcome)
+  printf 'Yes.\n' > "$home/yes.txt"
+  for id in sample-replay-direct sample-replay-bare; do
+    run_captain_budgeted "$home" hold "$id" --title "Replay $id" --reason "choose" --repo "$id" >/dev/null \
+      || fail "could not hold $id"
+  done
+  run_captain_budgeted "$home" answer sample-replay-direct --decision-file "$home/yes.txt" --outcome recommended >/dev/null \
+    || fail "could not answer with an outcome"
+  run_captain_budgeted "$home" answer sample-replay-direct --decision-file "$home/yes.txt" --outcome recommended >/dev/null \
+    || fail "a matching outcome replay was refused"
+  run_captain_budgeted "$home" answer sample-replay-direct --decision-file "$home/yes.txt" >/dev/null \
+    || fail "a replay that omits the outcome was refused"
+  if run_captain_budgeted "$home" answer sample-replay-direct --decision-file "$home/yes.txt" --outcome different \
+    > "$home/changed.out" 2> "$home/changed.err"; then
+    fail "a replay changed the recorded outcome"
+  fi
+  assert_grep "records recommended outcome" "$home/changed.err" "the refusal did not name the recorded outcome"
+  run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" >/dev/null \
+    || fail "could not answer without an outcome"
+  if run_captain_budgeted "$home" answer sample-replay-bare --decision-file "$home/yes.txt" --outcome recommended \
+    > "$home/added.out" 2> "$home/added.err"; then
+    fail "a replay added an outcome the answer never recorded"
+  fi
+  run_captain_budgeted "$home" hold sample-replay-keyed --title "Keyed replay" --reason "choose" \
+    --repo sample-replay-keyed >/dev/null || fail "could not hold the keyed call"
+  printf 'sample-replay-keyed\tyes\tYes\n' > "$home/keyed.tsv"
+  run_captain_budgeted "$home" answers --source "test board" < "$home/keyed.tsv" >/dev/null \
+    || fail "the keyed answer failed"
+  out=$(run_captain_budgeted "$home" answers --source "test board" < "$home/keyed.tsv") \
+    || fail "a keyed replay failed"
+  assert_contains "$out" "closed: sample-replay-keyed" "a keyed replay was not an idempotent no-op"
+  assert_equals "captain calls (all time): 3 - other 3 (recommended 1, unrecorded 2)" \
+    "$(run_captain_budgeted "$home" tally)" "the tally did not keep each recorded outcome"
+  pass "an answer replay may omit but never change or add its recorded outcome"
+}
+
 test_call_budget_refuses_a_fourth_untagged_call
 test_kinds_outcomes_tally_and_aging
+test_rehold_keeps_metadata_shaped_text_in_answers_and_prose
+test_budget_tags_kinds_and_outcomes_match_exactly
+test_reactivating_a_deferred_call_respects_the_budget
+test_answer_replay_never_changes_the_recorded_outcome
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
