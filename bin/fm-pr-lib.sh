@@ -823,6 +823,68 @@ fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
   fm_pr_poll_artifacts_valid "$state" "$id" "$template"
 }
 
+# Recover a watch copied before a committed template update. The old copy must
+# pass all registration proofs and occur at this path in HEAD's history; a
+# self-consistent registration alone cannot authorize arbitrary check source.
+# The installed template must match HEAD. No state-file source is executed.
+# Callers source fm-wake-lib.sh for the control, metadata and publication locks.
+# Pending retirement remains owned by its existing recovery path.
+fm_pr_poll_refresh_template() (  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 check root repo_root head current_blob old_blob revision found=0
+  local control_lock meta_lock publish_lock control_held=0 meta_held=0 publish_held=0
+  fm_pr_task_id_valid "$id" || exit 1
+  check="$state/$id.check.sh"
+  [ -f "$template" ] && [ ! -L "$template" ] || exit 1
+  cmp -s "$template" "$check" && exit 1
+  [ ! -e "$state/$id.pr-poll-retirement" ] && [ ! -L "$state/$id.pr-poll-retirement" ] || exit 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$check" || exit 1
+  root=$(cd "$(dirname "$template")/.." && pwd -P) || exit 1
+  repo_root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || exit 1
+  [ "$(cd "$repo_root" && pwd -P)" = "$root" ] || exit 1
+  head=$(git -C "$root" rev-parse HEAD 2>/dev/null) || exit 1
+  current_blob=$(git -C "$root" rev-parse "$head:bin/fm-pr-poll.sh" 2>/dev/null) || exit 1
+  [ "$(git -C "$root" hash-object -- "$template")" = "$current_blob" ] || exit 1
+  old_blob=$(git -C "$root" hash-object -- "$check") || exit 1
+  while IFS= read -r revision; do
+    if [ "$(git -C "$root" rev-parse "$revision:bin/fm-pr-poll.sh" 2>/dev/null)" = "$old_blob" ]; then
+      found=1
+      break
+    fi
+  done < <(git -C "$root" log --format=%H "$head" -- bin/fm-pr-poll.sh 2>/dev/null)
+  [ "$found" -eq 1 ] || exit 1
+
+  control_lock="$state/.control-$id.lock"
+  meta_lock=$(fm_meta_lock_path "$state/$id.meta") || exit 1
+  publish_lock="$state/.pr-poll-publish-$id.lock"
+  # shellcheck disable=SC2329 # Invoked by the subshell's EXIT trap.
+  refresh_cleanup() {
+    fm_pr_poll_cleanup
+    [ "$publish_held" -eq 0 ] || fm_lock_release "$publish_lock"
+    [ "$meta_held" -eq 0 ] || fm_lock_release "$meta_lock"
+    [ "$control_held" -eq 0 ] || fm_lock_release "$control_lock"
+  }
+  trap refresh_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+  fm_lock_acquire_wait "$control_lock" || exit 1
+  control_held=1
+  fm_lock_acquire_wait "$meta_lock" || exit 1
+  meta_held=1
+  fm_lock_acquire_wait "$publish_lock" || exit 1
+  publish_held=1
+  [ ! -e "$state/$id.pr-poll-retirement" ] && [ ! -L "$state/$id.pr-poll-retirement" ] || exit 1
+  fm_pr_poll_snapshot_capture "$state" "$id" "$check" || exit 1
+  [ "$(git -C "$root" hash-object -- "$check")" = "$old_blob" ] || exit 1
+  cmp -s "$template" "$check" && exit 1
+  fm_pr_poll_prepare "$state" "$id" "$FM_PR_POLL_SNAPSHOT_PROVIDER" \
+    "$FM_PR_POLL_SNAPSHOT_URL" "$FM_PR_POLL_SNAPSHOT_HOST" \
+    "$FM_PR_POLL_SNAPSHOT_PATH" "$FM_PR_POLL_SNAPSHOT_NUMBER" "$template" || exit 1
+  fm_pr_poll_snapshot_matches "$state" "$id" "$check" || exit 1
+  [ "$(git -C "$root" rev-parse HEAD)" = "$head" ] || exit 1
+  [ "$(git -C "$root" hash-object -- "$template")" = "$current_blob" ] || exit 1
+  [ "$(git -C "$root" hash-object -- "$FM_PR_POLL_CHECK_TMP")" = "$current_blob" ] || exit 1
+  fm_pr_poll_publish_prepared
+)
+
 fm_pr_poll_snapshot_capture() {
   local state=$1 id=$2 template=$3 registration
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
+# Stale merge-poll copies are refreshed at check time only after authentication
+# against committed template history (bin/fm-pr-lib.sh); unsafe copies stay refused.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
@@ -2809,7 +2811,11 @@ while :; do
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
           || { rerecord_device_shifted_pr_poll "$id" \
-            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
+            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } \
+          || { if fm_pr_poll_refresh_template "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+                 triage_log "refreshed PR poll template for $id after a committed template update"
+               fi
+               fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL

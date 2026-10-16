@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
 # private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# Use --template-drift for the isolated check-time template recovery regression.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -3602,6 +3603,98 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_template_drift_refreshes_only_authentic_polls() {
+  local dir state template old id WATCH before bad_before
+  dir=$(make_case template-drift-refresh)
+  state="$dir/home/state"
+  cp -R "$ROOT/bin/." "$dir/root/bin/"
+  WATCH="$dir/root/bin/fm-watch.sh"
+  template="$dir/root/bin/fm-pr-poll.sh"
+  printf '\n# Previous committed template.\n' >> "$template"
+  git -C "$dir/root" init -q
+  git -C "$dir/root" add bin
+  git -C "$dir/root" commit -qm previous-template
+  old="$dir/old-template"
+  cp "$template" "$old"
+  for id in good bad-registration altered replaced foreign; do
+    write_poll_meta "$state" "$id" https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" "$id" https://github.com/o/r/pull/1 "$old"
+  done
+  # A syntactically valid record whose hash disagrees must not be repaired.
+  sed '8s/.*/0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$state/bad-registration.pr-poll-registration" > "$dir/bad-registration"
+  cat "$dir/bad-registration" > "$state/bad-registration.pr-poll-registration"
+  printf '#!/usr/bin/env bash\nprintf unsafe > "%s"\n' "$dir/executed" > "$dir/unsafe-template"
+  cat "$old" >> "$dir/unsafe-template"
+  cat "$dir/unsafe-template" > "$state/altered.check.sh"
+  cp "$state/replaced.check.sh" "$dir/replacement"
+  chmod 600 "$dir/replacement"
+  mv "$dir/replacement" "$state/replaced.check.sh"
+  # Matching hashes and identities are insufficient if the source was never
+  # committed as this checkout's poll template.
+  seed_canonical_poll "$dir" foreign https://github.com/o/r/pull/1 "$dir/unsafe-template"
+  bad_before=$(for id in bad-registration altered replaced foreign; do poll_artifact_snapshot "$state" "$id"; done)
+  before=$(fm_pr_file_identity "$state/good.check.sh")
+  cp "$POLL" "$template"
+  # A dirty installed template is not an authorized update.
+  ! fm_pr_poll_refresh_template "$state" good "$template" || fail "refresh accepted dirty template"
+  [ "$(fm_pr_file_identity "$state/good.check.sh")" = "$before" ] || fail "dirty template changed the watch"
+  git -C "$dir/root" add bin/fm-pr-poll.sh
+  git -C "$dir/root" commit -qm current-template
+  # Even a genuine old poll cannot be refreshed over a pending retirement.
+  : > "$state/good.pr-poll-retirement"
+  ! fm_pr_poll_refresh_template "$state" good "$template" || fail "refresh ignored pending retirement"
+  rm "$state/good.pr-poll-retirement"
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *good.pr-poll-registration)
+    for lock in .control-good.lock .meta-good.lock .pr-poll-publish-good.lock; do
+      [ -d '$state'/"\$lock" ] || exit 91
+    done
+    ;;
+esac
+exec '$REAL_MV' "\$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN FM_TEST_WATCH_ROOT="$dir/root" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "template refresh watcher failed: $(cat "$dir/first.err")"
+  fm_pr_poll_artifacts_valid "$state" good "$template" || fail "genuine stale poll did not refresh"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "refreshed poll was not queried in the same cycle"
+  assert_not_contains "$(cat "$dir/first.out")" 'good.check.sh' 'healed poll must not be rejected'
+  for id in bad-registration altered replaced foreign; do
+    assert_contains "$(cat "$dir/first.out")" "$id.check.sh" 'unsafe poll must still be rejected'
+  done
+  [ "$(for id in bad-registration altered replaced foreign; do poll_artifact_snapshot "$state" "$id"; done)" = "$bad_before" ] \
+    || fail "refresh modified unsafe artifacts"
+  [ ! -e "$dir/executed" ] || fail "refresh executed state-file source"
+  grep -F 'refreshed PR poll template for good' "$state/.watch-triage.log" >/dev/null \
+    || fail "refresh did not log its repair"
+  before=$(fm_pr_file_identity "$state/good.check.sh")
+  ack_watcher_cycle "$state" || fail "could not acknowledge rejection controls"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN FM_TEST_WATCH_ROOT="$dir/root" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/second.out" 2> "$dir/second.err" \
+    || fail "repeat template refresh watcher failed"
+  [ "$(fm_pr_file_identity "$state/good.check.sh")" = "$before" ] || fail "current watch was republished"
+  [ "$(grep -c 'refreshed PR poll template for good' "$state/.watch-triage.log")" -eq 1 ] \
+    || fail "repair was logged more than once"
+  ack_watcher_cycle "$state" || fail "could not acknowledge repeat controls"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED FM_TEST_WATCH_ROOT="$dir/root" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err" \
+    || fail "refreshed poll failed to detect merge"
+  assert_contains "$(cat "$dir/merged.out")" 'good.check.sh: merged' 'refreshed watch must detect merge'
+  assert_poll_absent "$state" good
+  pass "committed template drift heals at check time; tampering stays rejected and repaired watches still detect merges"
+}
+
+if [ "${1:-}" = --template-drift ]; then
+  test_template_drift_refreshes_only_authentic_polls
+  exit 0
+fi
+
+test_template_drift_refreshes_only_authentic_polls
 test_parser_matrix
 test_gitlab_merge_watch
 test_forgejo_merge_watch
