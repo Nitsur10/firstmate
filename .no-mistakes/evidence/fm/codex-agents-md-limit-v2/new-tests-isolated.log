@@ -1,0 +1,11 @@
+ok - fm-startup-growth-check
+exit=0
+not ok - codex crewmate spawn should succeed
+warning: /private/var/folders/35/wppwj_pd6pz042pvz5f42c8h0000gp/T/fm-spawn-dispatch-profile.OpZ80b/profile-codex-hooks/home/data/profile-codex-hooks-z4c/launch-brief.md records no ship branch; defaulting to legacy branch fm/profile-codex-hooks-z4c
+warning: /private/var/folders/35/wppwj_pd6pz042pvz5f42c8h0000gp/T/fm-spawn-dispatch-profile.OpZ80b/profile-codex-hooks/home/data/profile-codex-hooks-z4c/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); l
+error: spawn refused for profile-codex-hooks-z4c: cannot determine whether /private/var/folders/35/wppwj_pd6pz042pvz5f42c8h0000gp/T/fm-spawn-dispatch-profile.OpZ80b/profile-codex-hooks/project shares firstmate's history (the code root /var/folders/35
+error: to let this home publish to path:/private/var/folders/35/wppwj_pd6pz042pvz5f42c8h0000gp/T/fm-spawn-dispatch-profile.OpZ80b/profile-codex-hooks/project, write 'maintainer path:/private/var/folders/35/wppwj_pd6pz042pvz5f42c8h0000gp/T/fm-spawn-di
+exit=1
+ok - a codex crewmate launches with the raised project instruction limit
+ok - a codex secondmate launches with the raised project instruction limit
+# all fm-spawn-dispatch-profile tests passed
