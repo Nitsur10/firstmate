@@ -711,6 +711,7 @@ A due evaluation uses file metadata and byte sizes before any content inspection
 `bin/fm-startup-memory-budget.sh` remains the sole owner of the budget total and its verdict, so the check never re-derives either: when that owner annotates an overrun caused by the primary-owned `data/captain-shared.md` alone, a secondmate home is not woken about an overrun it cannot act on.
 A secondmate home is likewise not notified about per-file growth of that same primary-owned `data/captain-shared.md`, which it receives read-only; the growth is still observed and recorded, and a primary home reports it normally.
 Those tracked bytes are code and instruction-surface size, not prompt-memory cost.
+A tracked `AGENTS.md` larger than the verified harness instruction limit owned by `bin/fm-instruction-limits-lib.sh` is also a finding regardless of the growth thresholds, because Codex silently drops the excess; the launch value that keeps Firstmate-launched Codex sessions under that limit is documented in the [Codex adapter reference](../.agents/skills/harness-adapters/references/harness/codex.md).
 The check does not run session-start, bootstrap, network checks, model calls, repository refreshes, `/stow`, or full preference/learnings rereads.
 
 Growth is measured against a per-file baseline retained in the check's own state record, so accumulation that stays under one day's threshold is still caught once it adds up; reporting a file rebases its baseline to the reported size, so accepted growth then stays silent.

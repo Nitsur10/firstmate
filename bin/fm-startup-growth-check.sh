@@ -39,8 +39,9 @@
 #   250 estimated tokens, ceil(bytes / 3), for printed startup memory files
 # Budget overrun is always meaningful.
 # AGENTS.md over a verified harness limit (bin/fm-instruction-limits-lib.sh) is
-# reported on every due evaluation until it fits, because the harness silently
-# drops the excess rather than failing.
+# meaningful regardless of the thresholds, because the harness silently drops
+# the excess rather than failing; it is reported once and deduplicated until it
+# fits.
 #
 # A due evaluation also removes the empty temporary records a killed
 # evaluation can leave in state/: only files matching its own mint pattern
@@ -78,7 +79,7 @@ BUDGET_BIN="$SCRIPT_DIR/fm-startup-memory-budget.sh"
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 usage() {
-  sed -n '2,51{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,52{s/^# \{0,1\}//;p;}' "$0"
 }
 
 fail() {
