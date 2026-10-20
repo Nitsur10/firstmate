@@ -38,6 +38,10 @@
 #   2048 bytes for tracked startup/instruction files
 #   250 estimated tokens, ceil(bytes / 3), for printed startup memory files
 # Budget overrun is always meaningful.
+# AGENTS.md over a verified harness limit (bin/fm-instruction-limits-lib.sh) is
+# meaningful regardless of the thresholds, because the harness silently drops
+# the excess rather than failing; it is reported once and deduplicated until it
+# fits.
 #
 # A due evaluation also removes the empty temporary records a killed
 # evaluation can leave in state/: only files matching its own mint pattern
@@ -69,11 +73,13 @@ BUDGET_BIN="$SCRIPT_DIR/fm-startup-memory-budget.sh"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-instruction-limits-lib.sh
+. "$SCRIPT_DIR/fm-instruction-limits-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 usage() {
-  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,52{s/^# \{0,1\}//;p;}' "$0"
 }
 
 fail() {
@@ -269,6 +275,13 @@ evaluate_budget() {
   append_finding "startup memory budget overrun total_estimated_tokens=$total budget=$budget owner=bin/fm-startup-memory-budget.sh"
 }
 
+evaluate_instruction_limit() {
+  local overrun bytes limit owner
+  overrun=$(fm_instruction_limit_overrun "$FM_ROOT/AGENTS.md") || return 0
+  read -r bytes limit owner <<< "$overrun"
+  append_finding "AGENTS.md exceeds harness instruction limit ${bytes} bytes > ${limit} ($owner), the excess is silently dropped"
+}
+
 run_check() {
   local now reported_previous
   if ! now=$(check_due); then
@@ -298,6 +311,7 @@ run_check() {
   stat_surface memory data/learnings.md "$DATA_DIR/learnings.md" yes
 
   evaluate_budget
+  evaluate_instruction_limit
 
   if [ -n "$FINDINGS" ]; then
     if [ "$FINDINGS" != "$reported_previous" ]; then

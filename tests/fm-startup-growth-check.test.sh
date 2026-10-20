@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=bin/fm-instruction-limits-lib.sh
+. "$ROOT/bin/fm-instruction-limits-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-growth-check)
 CHECK="$ROOT/bin/fm-startup-growth-check.sh"
@@ -238,6 +240,31 @@ test_budget_overrun_reports_and_separates_prompt_cost() {
   [ -z "$out" ] || fail "standing budget overrun was reported again instead of deduplicated: $out"
 }
 
+test_agents_md_over_the_harness_limit_is_reported_until_it_fits() {
+  local rec root home result out
+  rec=$(make_world doclimit)
+  root=${rec%%|*}
+  home=${rec#*|}
+  head -c "$FM_INSTRUCTION_LIMIT_BYTES" /dev/zero | tr '\000' x > "$root/AGENTS.md"
+  result=$(run_check "$root" "$home" 1000)
+  [ "$(status_part "$result")" = 0 ] || fail "at-limit check failed: $(output_part "$result")"
+  out=$(output_part "$result")
+  [ -z "$out" ] || fail "AGENTS.md exactly at the limit should stay silent: $out"
+  printf 'x' >> "$root/AGENTS.md"
+  result=$(run_check "$root" "$home" 87401)
+  out=$(output_part "$result")
+  assert_contains "$out" "AGENTS.md exceeds harness instruction limit $((FM_INSTRUCTION_LIMIT_BYTES + 1)) bytes > $FM_INSTRUCTION_LIMIT_BYTES" \
+    "AGENTS.md one byte over the limit was not reported"
+  assert_contains "$out" 'project_doc_max_bytes' "the finding did not name the limit's owner"
+  result=$(run_check "$root" "$home" 174801)
+  out=$(output_part "$result")
+  [ -z "$out" ] || fail "a standing instruction overrun was reported again instead of deduplicated: $out"
+  head -c 1000 /dev/zero | tr '\000' x > "$root/AGENTS.md"
+  result=$(run_check "$root" "$home" 262201)
+  out=$(output_part "$result")
+  assert_not_contains "$out" 'instruction limit' "a fitting AGENTS.md still reported an overrun"
+}
+
 test_secondmate_is_not_woken_about_the_primary_owned_shared_overrun() {
   local rec root home result out
   rec=$(make_world secondmate)
@@ -424,6 +451,7 @@ make_isolated_bin() {  # <name> <register-exit-code>
   mkdir -p "$bin"
   cp "$ROOT/bin/fm-startup-growth-check.sh" "$ROOT/bin/fm-pr-lib.sh" \
     "$ROOT/bin/fm-startup-memory-budget-lib.sh" "$ROOT/bin/fm-line-cap-lib.sh" \
+    "$ROOT/bin/fm-instruction-limits-lib.sh" \
     "$ROOT/bin/fm-check-lib.sh" "$ROOT/bin/fm-startup-memory-budget.sh" "$bin/"
   if [ "$code" = 0 ]; then
     cp "$ROOT/bin/fm-check-register.sh" "$bin/fm-check-register.sh"
@@ -612,6 +640,7 @@ test_first_content_of_an_optional_file_is_baselined_silently
 test_established_baseline_survives_disappearance_and_restoration
 test_secondmate_is_not_notified_about_primary_owned_shared_growth
 test_budget_overrun_reports_and_separates_prompt_cost
+test_agents_md_over_the_harness_limit_is_reported_until_it_fits
 test_secondmate_is_not_woken_about_the_primary_owned_shared_overrun
 test_metadata_read_failure_keeps_the_retained_baseline
 test_due_unsafe_inputs_are_reported_but_absent_optional_memory_is_not
