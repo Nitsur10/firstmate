@@ -1,0 +1,10 @@
+## B: lab root with the real AGENTS.md copy (50015 bytes) -> expect no instruction-limit finding
+rc=0
+## C: AGENTS.md at 131073 bytes (1 over limit), next due eval -> expect warning
+startup-growth: tracked startup surface growth AGENTS.md +81058 bytes (total 131073 bytes); AGENTS.md exceeds harness instruction limit 131073 bytes > 131072 (codex project_doc_max_bytes), the excess is silently dropped
+rc=0
+## D: still over, next due eval, same finding deduped?
+startup-growth: AGENTS.md exceeds harness instruction limit 131073 bytes > 131072 (codex project_doc_max_bytes), the excess is silently dropped
+rc=0
+## E: shrink to fit, next due -> silent
+rc=0
