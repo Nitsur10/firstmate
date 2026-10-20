@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-instruction-limits-lib.sh
+. "$ROOT/bin/fm-instruction-limits-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -602,6 +604,43 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   assert_contains "$launch" "notify=" \
     "codex crewmate launch lost the turn-end notify program"
   pass "a codex crewmate launches with no hook layer and keeps its turn-end signal"
+}
+
+# Codex silently drops project instructions past project_doc_max_bytes (default
+# 32768), which cut AGENTS.md off mid-section 8; every launch Firstmate builds
+# must raise it to the value bin/fm-instruction-limits-lib.sh owns.
+test_codex_crewmate_launch_raises_the_project_doc_limit() {
+  local rec id out status launch
+  id=profile-codex-doclimit-z4e
+  rec=$(make_spawn_case profile-codex-doclimit codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex crewmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-c project_doc_max_bytes=$FM_CODEX_PROJECT_DOC_MAX_BYTES " \
+    "codex crewmate launch did not raise the project instruction limit"
+  [ "$(grep -o 'project_doc_max_bytes' <<< "$launch" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "codex crewmate launch should name project_doc_max_bytes exactly once: $launch"
+  pass "a codex crewmate launches with the raised project instruction limit"
+}
+
+test_codex_secondmate_launch_raises_the_project_doc_limit() {
+  local rec id sm out status launch
+  id=profile-codex-secondmate-doclimit-z4f
+  rec=$(make_spawn_case profile-codex-secondmate-doclimit codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-c project_doc_max_bytes=$FM_CODEX_PROJECT_DOC_MAX_BYTES " \
+    "codex secondmate launch did not raise the project instruction limit"
+  pass "a codex secondmate launches with the raised project instruction limit"
 }
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
@@ -2212,6 +2251,8 @@ test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
+test_codex_crewmate_launch_raises_the_project_doc_limit
+test_codex_secondmate_launch_raises_the_project_doc_limit
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
